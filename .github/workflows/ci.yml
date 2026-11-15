@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxkbcommon-x11-0 mesa-vulkan-drivers
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace -- --test-threads=2
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: oxlet-windows-x64 }
+          - { os: macos-latest, target: aarch64-apple-darwin, name: oxlet-macos-arm64 }
+          - { os: macos-latest, target: x86_64-apple-darwin, name: oxlet-macos-x64 }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, name: oxlet-linux-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - run: cargo build --release --locked -p oxlet --target ${{ matrix.target }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/oxlet.exe dist/Oxlet.exe
+          Compress-Archive -Path dist/Oxlet.exe -DestinationPath ${{ matrix.name }}.zip
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          app=dist/Oxlet.app/Contents
+          mkdir -p "$app/MacOS"
+          cp target/${{ matrix.target }}/release/oxlet "$app/MacOS/Oxlet"
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version="${GITHUB_REF_NAME#v}"; fi
+          sed "s|__VERSION__|$version|" packaging/macos/Info.plist > "$app/Info.plist"
+          mkdir -p "$app/Resources" oxlet.iconset
+          for px in 16 32 128 256 512; do
+            sips -z $px $px packaging/icons/oxlet-1024.png --out oxlet.iconset/icon_${px}x${px}.png >/dev/null
+            sips -z $((px * 2)) $((px * 2)) packaging/icons/oxlet-1024.png --out oxlet.iconset/icon_${px}x${px}@2x.png >/dev/null
+          done
+          iconutil -c icns oxlet.iconset -o "$app/Resources/Oxlet.icns"
+          codesign --force --deep --sign - dist/Oxlet.app
+          (cd dist && ditto -c -k --keepParent Oxlet.app ../${{ matrix.name }}.zip)
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist && cp target/${{ matrix.target }}/release/oxlet dist/oxlet
+          tar -C dist -czf ${{ matrix.name }}.tar.gz oxlet
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.*
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.name }}.*

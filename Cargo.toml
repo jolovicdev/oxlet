@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/oxlet-core", "crates/oxlet"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+oxlet-core = { path = "crates/oxlet-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+codegen-units = 16
+incremental = true
+
+# Cargo does not inherit patches from a dependency; these mirror Rune's own [patch.crates-io] at the same rev.
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20" }

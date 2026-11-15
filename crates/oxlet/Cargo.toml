@@ -1,0 +1,20 @@
+[package]
+name = "oxlet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A focused, native workspace for coding agents."
+
+[dependencies]
+oxlet-core.workspace = true
+rune = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20", features = ["markdown"] }
+rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20" }
+rune-notify = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20" }
+
+[build-dependencies]
+winresource = "0.1"
+
+[features]
+# Headless rendering and scripting (`--snap`, `--tree`, `--script`) in release builds.
+tooling = ["rune/tooling"]
