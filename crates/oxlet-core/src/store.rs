@@ -33,12 +33,13 @@ pub fn state_file(dir: &Path) -> PathBuf {
     dir.join("workspace.json")
 }
 
-/// Reads the workspace. A missing file is an empty workspace; an unreadable one is kept aside.
+/// Reads the workspace. A missing file is an empty workspace. One that does not parse is moved
+/// aside, and its new path is returned: the next save would otherwise write over it.
 /// No turn outlives the app, so a thread saved mid-turn loads idle.
-pub fn load(dir: &Path) -> Workspace {
+pub fn load(dir: &Path) -> (Workspace, Option<PathBuf>) {
     let file = state_file(dir);
     let Ok(text) = std::fs::read_to_string(&file) else {
-        return Workspace::default();
+        return (Workspace::default(), None);
     };
     match serde_json::from_str::<Workspace>(&text) {
         Ok(mut w) => {
@@ -49,11 +50,12 @@ pub fn load(dir: &Path) -> Workspace {
             {
                 Arc::make_mut(t).status = ThreadStatus::Idle;
             }
-            w
+            (w, None)
         }
         Err(_) => {
-            let _ = std::fs::rename(&file, dir.join("workspace.corrupt.json"));
-            Workspace::default()
+            let aside = dir.join("workspace.corrupt.json");
+            let moved = std::fs::rename(&file, &aside).is_ok();
+            (Workspace::default(), moved.then_some(aside))
         }
     }
 }
@@ -144,15 +146,16 @@ mod tests {
     fn save_then_load_and_quarantine_corruption() {
         let dir = std::env::temp_dir().join(format!("oxlet-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(load(&dir), Workspace::default());
+        assert_eq!(load(&dir), (Workspace::default(), None));
         let mut w = Workspace::default();
         let p = w.add_project("/tmp/x");
         w.create_thread(&p, ProviderId::Codex, "", 7);
         save(&dir, &w).unwrap();
-        assert_eq!(load(&dir), w);
+        assert_eq!(load(&dir), (w, None));
         std::fs::write(state_file(&dir), "{oops").unwrap();
-        assert_eq!(load(&dir), Workspace::default());
-        assert!(dir.join("workspace.corrupt.json").exists());
+        let aside = dir.join("workspace.corrupt.json");
+        assert_eq!(load(&dir), (Workspace::default(), Some(aside.clone())));
+        assert_eq!(std::fs::read_to_string(aside).unwrap(), "{oops");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -197,7 +200,7 @@ mod tests {
         let t = w.create_thread(&p, ProviderId::Claude, "", 1);
         w.thread_mut(&t).unwrap().status = ThreadStatus::Working;
         save(&dir, &w).unwrap();
-        assert_eq!(load(&dir).thread(&t).unwrap().status, ThreadStatus::Idle);
+        assert_eq!(load(&dir).0.thread(&t).unwrap().status, ThreadStatus::Idle);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

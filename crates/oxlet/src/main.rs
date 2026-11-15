@@ -46,7 +46,15 @@ fn init() -> App {
         return app;
     }
     let dir = store::home();
-    App::new(store::load(&dir), dir, offset)
+    let (ws, aside) = store::load(&dir);
+    let app = App::new(ws, dir, offset);
+    if let Some(aside) = aside {
+        app.bridge.send(Event::Notice(format!(
+            "workspace.json could not be read, so Oxlet started empty. The file is kept as {}.",
+            aside.display()
+        )));
+    }
+    app
 }
 
 fn setup(s: &mut App, waker: Waker) {

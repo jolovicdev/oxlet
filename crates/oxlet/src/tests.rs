@@ -1241,7 +1241,7 @@ fn quitting_stops_turns_and_saves() {
         .trim()
         .to_owned();
     rt.update(crate::quit);
-    let saved = oxlet_core::store::load(&sb.root.join("home"));
+    let saved = oxlet_core::store::load(&sb.root.join("home")).0;
     assert_eq!(saved.threads[0].messages[0].text(), "long job");
     let alive = || {
         std::process::Command::new("kill")
