@@ -24,16 +24,16 @@ Outside a single thread there is a board of every thread by status, the reposito
 
 ## Install
 
-Download the build for your system from the [latest release](https://github.com/jolovicdev/oxlet/releases/latest):
+Download the installer for your system from the [latest release](https://github.com/jolovicdev/oxlet/releases/latest):
 
-| System | File |
-|---|---|
-| Windows x64 | `oxlet-windows-x64.zip` with `Oxlet.exe` |
-| macOS, Apple silicon | `oxlet-macos-arm64.zip` with `Oxlet.app` |
-| macOS, Intel | `oxlet-macos-x64.zip` with `Oxlet.app` |
-| Linux x64 | `oxlet-linux-x64.tar.gz` with `oxlet` |
+| System | Installer | Portable |
+|---|---|---|
+| Windows x64 | `oxlet-windows-x64-setup.exe` | `oxlet-windows-x64.zip` |
+| macOS, Apple silicon | `oxlet-macos-arm64.dmg` | `oxlet-macos-arm64.zip` |
+| macOS, Intel | `oxlet-macos-x64.dmg` | `oxlet-macos-x64.zip` |
+| Debian and Ubuntu, x64 | `oxlet-linux-x64.deb` | `oxlet-linux-x64.tar.gz` |
 
-The macOS app is not notarised. The first time, right-click Oxlet.app and choose Open.
+The Windows installer needs no administrator rights and adds Oxlet to the Start menu. The builds are not code-signed yet: Windows SmartScreen asks you to confirm the first run, and on macOS you right-click Oxlet.app and choose Open the first time.
 
 Oxlet does not include an agent. Install at least one agent CLI and sign in to it by running it once in a terminal: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`) and [Codex](https://github.com/openai/codex) (`codex`) have the fullest support, and Cursor's agent, OpenCode, Gemini CLI and Factory Droid also work. Oxlet finds them on your `PATH`; if one lives somewhere else, set its path in Settings → Agent providers. You also need Git, and the [GitHub CLI](https://cli.github.com) (`gh`) if you want the pull request list.
 

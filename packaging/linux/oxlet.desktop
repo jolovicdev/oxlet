@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Oxlet
+Comment=Desktop workspace for coding agents
+Exec=oxlet
+Icon=oxlet
+Terminal=false
+Categories=Development;

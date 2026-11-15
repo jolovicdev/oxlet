@@ -61,6 +61,10 @@ jobs:
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item target/${{ matrix.target }}/release/oxlet.exe dist/Oxlet.exe
           Compress-Archive -Path dist/Oxlet.exe -DestinationPath ${{ matrix.name }}.zip
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $version = $env:GITHUB_REF_NAME.TrimStart('v') }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\windows\oxlet.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -78,17 +82,22 @@ jobs:
           iconutil -c icns oxlet.iconset -o "$app/Resources/Oxlet.icns"
           codesign --force --deep --sign - dist/Oxlet.app
           (cd dist && ditto -c -k --keepParent Oxlet.app ../${{ matrix.name }}.zip)
+          mkdir dmg && cp -R dist/Oxlet.app dmg/ && ln -s /Applications dmg/Applications
+          hdiutil create -volname Oxlet -srcfolder dmg -ov -format UDZO ${{ matrix.name }}.dmg
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist && cp target/${{ matrix.target }}/release/oxlet dist/oxlet
           tar -C dist -czf ${{ matrix.name }}.tar.gz oxlet
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version="${GITHUB_REF_NAME#v}"; fi
+          packaging/linux/build-deb.sh dist/oxlet "$version" ${{ matrix.name }}.deb
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: ${{ matrix.name }}.*
+          path: ${{ matrix.name }}*
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.name }}.*
+          files: ${{ matrix.name }}*

@@ -1,0 +1,11 @@
+Package: oxlet
+Version: __VERSION__
+Architecture: amd64
+Maintainer: Dušan Jolović <184168873+jolovicdev@users.noreply.github.com>
+Section: devel
+Priority: optional
+Depends: libc6, libgcc-s1
+Recommends: git, libxkbcommon0, libwayland-client0, libvulkan1
+Description: Desktop workspace for coding agents
+ Runs agent CLIs such as Claude Code and Codex, with their diff, files,
+ terminal and git alongside.
