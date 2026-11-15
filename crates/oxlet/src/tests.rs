@@ -685,6 +685,7 @@ echo '{{"type":"result","is_error":false,"session_id":"r1"}}'"#
     assert_eq!(t.last_change().unwrap()[0].path, "notes.md");
     assert_eq!(t.last_change().unwrap()[0].added, 3);
 
+    rt.update(|s, _| s.dock.set_open(true));
     pump(&mut rt, |s| !s.repo.loading && s.repo.changes.len() == 2);
     assert_eq!(rt.state.repo.cwd.target, host);
     assert_eq!(rt.state.repo.status.branch.as_deref(), Some("main"));
@@ -761,7 +762,10 @@ fn discarding_a_file_waits_for_confirmation() {
     let repo = PathBuf::from(sb.repo());
     std::fs::write(repo.join("README.md"), "changed\n").unwrap();
     let mut rt = runtime(&sb, vec![]);
-    rt.update(|s, _| crate::actions::refresh_repo(s));
+    rt.update(|s, _| {
+        s.dock.set_open(true);
+        crate::actions::refresh_repo(s);
+    });
     pump(&mut rt, |s| s.repo.changes.len() == 1);
     rt.update(|s, _| s.confirm = Some(Pending::Discard("README.md".into())));
     rt.frame(1.0 / 60.0);
@@ -1318,7 +1322,7 @@ fn pull_requests_match_live_threads_of_this_project_only() {
     });
     rt.frame(1.0 / 60.0);
     assert!(rt.find("pr-5").is_some() && rt.find("pr-thread-5").is_none());
-    rt.update(|s, _| s.ws.threads[0].archived = false);
+    rt.update(|s, _| std::sync::Arc::make_mut(&mut s.ws.threads[0]).archived = false);
     rt.frame(1.0 / 60.0);
     assert!(rt.find("pr-thread-5").is_some());
 }
@@ -1339,4 +1343,117 @@ fn two_projects_with_one_name_can_each_be_picked() {
         rt.state.auto_project.as_ref(),
         Some(&rt.state.ws.projects[1].id)
     );
+}
+
+#[test]
+fn the_repository_is_read_only_on_screen_and_one_read_at_a_time() {
+    let sb = Sandbox::new("repo-shown");
+    std::fs::write(PathBuf::from(sb.repo()).join("README.md"), "changed\n").unwrap();
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, None)]);
+    rt.update(|s, _| crate::actions::refresh_repo(s));
+    pump(&mut rt, |s| s.repo.generation == 1 && !s.repo.reading);
+    assert_eq!(rt.state.repo.status.branch.as_deref(), Some("main"));
+    assert!(
+        rt.state.repo.changes.is_empty() && rt.state.repo.file_count == 0,
+        "the new-thread screen shows the branch only"
+    );
+    send(&mut rt, "start");
+    rt.update(|s, _| crate::actions::refresh_repo(s));
+    let start = Instant::now();
+    pump(&mut rt, |_| start.elapsed() > Duration::from_millis(200));
+    assert_eq!(
+        rt.state.repo.generation, 1,
+        "with the dock closed nothing shows the repository"
+    );
+    click(&mut rt, "toolbar-dock");
+    assert!(rt.state.repo.reading);
+    rt.update(|s, _| crate::actions::refresh_repo(s));
+    assert_eq!(
+        rt.state.repo.generation, 2,
+        "a second read waits for the first"
+    );
+    pump(&mut rt, |s| s.repo.generation == 3 && !s.repo.reading);
+    assert_eq!(rt.state.repo.changes.len(), 1);
+}
+
+#[test]
+fn a_changed_file_clicked_with_the_dock_closed_is_shown_once_read() {
+    let sb = Sandbox::new("reveal");
+    let repo = sb.repo();
+    let claude = sb.agent(
+        "claude",
+        &format!(
+            r#"printf 'new\n' > '{repo}/added.txt'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Write","input":{{"file_path":"{repo}/added.txt"}}}}]}}}}'
+echo '{{"type":"result","is_error":false,"session_id":"r"}}'"#
+        ),
+    );
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, Some(claude))]);
+    send(&mut rt, "Add a file");
+    pump(&mut rt, |s| {
+        idle(s) && s.thread().is_some_and(|t| t.last_change().is_some())
+    });
+    assert!(!rt.state.dock.is_open() && !rt.state.repo.fresh);
+    let reply = thread(&rt).messages[1].id.clone();
+    click(&mut rt, &format!("{reply}-file-added.txt"));
+    assert_eq!(rt.state.repo.reveal.as_deref(), Some("added.txt"));
+    pump(&mut rt, |s| s.repo.reveal.is_none() && !s.repo.reading);
+    assert!(rt.state.repo.diff.file_index("added.txt").is_some());
+}
+
+#[test]
+fn a_read_overtaken_by_a_newer_one_is_dropped() {
+    let sb = Sandbox::new("repo-stale");
+    let mut rt = runtime(&sb, vec![]);
+    let snapshot = |branch: &str| crate::state::RepoSnapshot {
+        status: oxlet_core::git::Status {
+            branch: Some(branch.into()),
+            ..Default::default()
+        },
+        changes: Vec::new(),
+        patch: String::new(),
+        untracked: Vec::new(),
+        log: Vec::new(),
+        branches: Vec::new(),
+    };
+    rt.update(|s, tx| {
+        let (here, there) = (s.ws.projects[0].id.clone(), s.ws.add_project("/elsewhere"));
+        crate::actions::refresh_repo(s);
+        let cwd = s.repo.cwd.clone();
+        for project in [there, here] {
+            s.draft_project = Some(project);
+            crate::actions::refresh_repo(s);
+        }
+        assert_eq!((&s.repo.cwd, s.repo.generation), (&cwd, 3));
+        crate::actions::apply_repo(s, cwd.clone(), 1, Ok(snapshot("old")), tx);
+        assert_eq!(s.repo.status.branch, None);
+        assert!(s.repo.reading);
+        crate::actions::apply_repo(s, cwd, 3, Ok(snapshot("new")), tx);
+        assert_eq!(s.repo.status.branch.as_deref(), Some("new"));
+        assert!(!s.repo.reading);
+    });
+}
+
+#[test]
+fn untracked_files_past_the_cap_are_listed_by_name_only() {
+    let sb = Sandbox::new("untracked-cap");
+    let repo = PathBuf::from(sb.repo());
+    for i in 0..250 {
+        std::fs::write(repo.join(format!("new{i:03}.txt")), "one line\n").unwrap();
+    }
+    let mut rt = runtime(&sb, vec![]);
+    rt.update(|s, _| {
+        s.dock.set_open(true);
+        crate::actions::refresh_repo(s);
+    });
+    pump(&mut rt, |s| !s.repo.reading && s.repo.changes.len() == 250);
+    let previewed = rt
+        .state
+        .repo
+        .changes
+        .iter()
+        .filter(|c| c.added == 1)
+        .count();
+    assert_eq!(previewed, 200);
+    assert_eq!(rt.state.repo.diff.files().len(), 250);
 }

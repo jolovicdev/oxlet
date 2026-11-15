@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::provider::ProviderId;
@@ -486,8 +488,10 @@ impl Default for Settings {
 pub struct Workspace {
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// Shared, so a snapshot for saving costs a pointer per thread; writing to a thread through
+    /// [`Workspace::thread_mut`] copies it first while a snapshot still holds it.
     #[serde(default)]
-    pub threads: Vec<Thread>,
+    pub threads: Vec<Arc<Thread>>,
     #[serde(default)]
     pub automations: Vec<Automation>,
     #[serde(default)]
@@ -507,11 +511,14 @@ impl Workspace {
     }
 
     pub fn thread(&self, id: &str) -> Option<&Thread> {
-        self.threads.iter().find(|t| t.id == id)
+        self.threads.iter().find(|t| t.id == id).map(|t| &**t)
     }
 
     pub fn thread_mut(&mut self, id: &str) -> Option<&mut Thread> {
-        self.threads.iter_mut().find(|t| t.id == id)
+        self.threads
+            .iter_mut()
+            .find(|t| t.id == id)
+            .map(Arc::make_mut)
     }
 
     pub fn add_project(&mut self, path: &str) -> Id {
@@ -556,7 +563,7 @@ impl Workspace {
     ) -> Id {
         let id = self.new_id("t");
         let access = self.settings.default_access;
-        self.threads.push(Thread {
+        self.threads.push(Arc::new(Thread {
             id: id.clone(),
             project: project.to_owned(),
             title: "New thread".into(),
@@ -579,7 +586,7 @@ impl Workspace {
             created: now,
             updated: now,
             messages: Vec::new(),
-        });
+        }));
         id
     }
 
@@ -588,7 +595,7 @@ impl Workspace {
     pub fn fork_thread(&mut self, id: &str, now: u64) -> Option<Id> {
         let source = self.thread(id)?.clone();
         let new = self.new_id("t");
-        self.threads.push(Thread {
+        self.threads.push(Arc::new(Thread {
             id: new.clone(),
             title: format!("{} (fork)", source.title),
             parent: Some(source.id.clone()),
@@ -601,7 +608,7 @@ impl Workspace {
             created: now,
             updated: now,
             ..source
-        });
+        }));
         Some(new)
     }
 
@@ -633,7 +640,12 @@ impl Workspace {
 
     /// Threads not archived, most recently updated first, pinned ones ahead of the rest.
     pub fn recent(&self) -> Vec<&Thread> {
-        let mut out: Vec<&Thread> = self.threads.iter().filter(|t| !t.archived).collect();
+        let mut out: Vec<&Thread> = self
+            .threads
+            .iter()
+            .map(|t| &**t)
+            .filter(|t| !t.archived)
+            .collect();
         out.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated.cmp(&a.updated)));
         out
     }

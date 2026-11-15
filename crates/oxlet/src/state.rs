@@ -119,6 +119,16 @@ pub enum Placement {
 #[derive(Default)]
 pub struct Repo {
     pub cwd: Place,
+    /// The last read started; results of any other are stale. It carries over to a new `cwd`.
+    pub generation: u64,
+    /// A read is running. One runs at a time: a request meanwhile is left to the next one.
+    pub reading: bool,
+    /// Nothing changed since the last read started, so the screen needs no other.
+    pub fresh: bool,
+    /// The last read started covers the dock, not only the branch.
+    pub full: bool,
+    /// A changed file to scroll the diff to once the read running or wanted lands.
+    pub reveal: Option<String>,
     pub loading: bool,
     pub error: Option<String>,
     pub status: git::Status,
@@ -176,11 +186,14 @@ pub enum Event {
     },
     Repo {
         cwd: Place,
+        generation: u64,
         result: Result<RepoSnapshot, String>,
     },
+    /// The project's files: how many, and as a tree.
     Files {
         cwd: Place,
-        result: Result<Vec<String>, String>,
+        generation: u64,
+        result: Result<(usize, TreeModel<FileNode<String>>), String>,
     },
     Term(u64, oxlet_core::process::Line),
     Prs(Result<Vec<PullRequest>, String>),
@@ -310,6 +323,7 @@ pub struct App {
 
     pub bridge: Bridge,
     pub inbox: Receiver<Event>,
+    pub saver: oxlet_core::store::Saver,
     pub dirty: bool,
     pub save_due: f64,
     pub next_automation_check: f64,
@@ -318,6 +332,19 @@ pub struct App {
 impl App {
     pub fn new(ws: Workspace, dir: PathBuf, offset: i64) -> App {
         let (tx, inbox) = channel();
+        let bridge = Bridge {
+            tx,
+            waker: Arc::new(Mutex::new(None)),
+        };
+        let saver = {
+            let (dir, bridge) = (dir.clone(), bridge.clone());
+            oxlet_core::store::Saver::new(move |ws| {
+                if let Err(e) = oxlet_core::store::save(&dir, ws) {
+                    eprintln!("Could not save the workspace: {e}");
+                    bridge.send(Event::Notice(format!("Could not save: {e}")));
+                }
+            })
+        };
         let mut app = App {
             ws,
             dir,
@@ -381,11 +408,9 @@ impl App {
             },
             prs: None,
             toast: None,
-            bridge: Bridge {
-                tx,
-                waker: Arc::new(Mutex::new(None)),
-            },
+            bridge,
             inbox,
+            saver,
             dirty: false,
             save_due: 0.0,
             next_automation_check: 0.0,

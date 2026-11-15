@@ -231,29 +231,43 @@ pub fn make_home_dir(target: &Target, relative: &str) -> Result<String, String> 
 }
 
 /// Each file's text, read on the target. A file larger than `cap` bytes, missing or not text
-/// reads as empty.
-pub fn read_texts(at: &Place, paths: &[String], cap: u64) -> Vec<String> {
-    if let Some(root) = at.local_path() {
-        return paths
-            .iter()
-            .map(|p| {
-                let path = root.join(p);
-                let small = std::fs::metadata(&path).is_ok_and(|m| m.len() <= cap);
-                small
-                    .then(|| std::fs::read_to_string(&path).ok())
-                    .flatten()
-                    .unwrap_or_default()
-            })
-            .collect();
-    }
-    // One process for every file. Each is `<length>\n<bytes>`, or `-` when it isn't a file;
-    // C locale so `${#c}` counts bytes.
-    let limit = (cap + 1).to_string();
+/// reads as empty. Files are read in order while their texts fit in `budget` bytes in all; the
+/// first that does not fit, and every file after it, read as empty.
+pub fn read_texts(at: &Place, paths: &[String], cap: u64, budget: u64) -> Vec<String> {
+    let Some(root) = at.local_path() else {
+        return read_by_shell(at, paths, cap, budget);
+    };
+    let mut left = budget;
+    paths
+        .iter()
+        .map(|p| {
+            let path = root.join(p);
+            match std::fs::metadata(&path).map(|m| m.len()) {
+                Ok(len) if len > cap => String::new(),
+                Ok(len) if len > left => {
+                    left = 0;
+                    String::new()
+                }
+                Ok(len) => {
+                    left -= len;
+                    std::fs::read_to_string(&path).unwrap_or_default()
+                }
+                Err(_) => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// [`read_texts`] in one process for every file. Each is `<length>\n<bytes>`, or `-` when it
+/// isn't a file or is past the budget; C locale so `${#c}` counts bytes.
+fn read_by_shell(at: &Place, paths: &[String], cap: u64, budget: u64) -> Vec<String> {
+    let (limit, budget) = ((cap + 1).to_string(), budget.to_string());
     let mut args = vec![
         "-c",
-        r#"LC_ALL=C; n=$1; shift; for f; do if [ -f "$f" ]; then c=$(head -c "$n" -- "$f"; echo x); c=${c%x}; printf '%s\n%s' "${#c}" "$c"; else echo -; fi; done"#,
+        r#"LC_ALL=C; n=$1; b=$2; shift 2; for f; do if [ "$b" -gt 0 ] && [ -f "$f" ]; then c=$(head -c "$n" -- "$f"; echo x); c=${c%x}; if [ ${#c} -lt "$n" ]; then if [ ${#c} -gt "$b" ]; then b=0; echo -; continue; fi; b=$((b - ${#c})); fi; printf '%s\n%s' "${#c}" "$c"; else echo -; fi; done"#,
         "sh",
         &limit,
+        &budget,
     ];
     args.extend(paths.iter().map(String::as_str));
     let out = process::bytes("sh", &args, at).unwrap_or_default();
@@ -639,6 +653,25 @@ mod tests {
             "5 bytes is over a cap of 4"
         );
         assert_eq!(parse_texts(out, 5, 8)[0], "hello");
+    }
+
+    #[test]
+    fn reading_stops_at_the_budget_on_every_target() {
+        let dir = std::env::temp_dir().join(format!("oxlet-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, size) in [("a", 10), ("big", 40), ("b", 10), ("c", 10), ("d", 1)] {
+            std::fs::write(dir.join(name), "x".repeat(size)).unwrap();
+        }
+        let paths: Vec<String> = ["a", "big", "missing", "b", "c", "d"]
+            .map(String::from)
+            .to_vec();
+        let at = Place::local(dir.to_str().unwrap());
+        let ten = "x".repeat(10);
+        let expected = [ten.as_str(), "", "", ten.as_str(), "", ""];
+        assert_eq!(read_texts(&at, &paths, 20, 25), expected);
+        assert_eq!(read_by_shell(&at, &paths, 20, 25), expected);
+        assert_eq!(read_by_shell(&at, &paths, 20, 1000)[5], "x");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

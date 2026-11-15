@@ -1,6 +1,9 @@
-use oxlet_core::model::{Automation, Schedule, Thread, ThreadStatus};
+use std::borrow::Cow;
+use std::rc::Rc;
+
+use oxlet_core::model::{Automation, Id, Schedule, Thread, ThreadStatus};
 use oxlet_core::time;
-use rune::{El, ScrollSpec, TextEdit, col, icon, row, text};
+use rune::{El, GrowthSpec, ScrollSpec, TextEdit, col, icon, row, text};
 use rune_kit::{
     Badge, BadgeVariant, Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit,
     Select, Spinner, Switch, TextArea, TextInput,
@@ -22,7 +25,7 @@ const COLUMNS: [(&str, &[ThreadStatus]); 5] = [
     ("Done", &[ThreadStatus::Done]),
 ];
 
-pub fn kanban(s: &App, k: &Kit) -> El {
+pub fn kanban(s: &App, k: &Rc<Kit>) -> El {
     let c = &k.c;
     let mut board = row()
         .w_full()
@@ -31,24 +34,39 @@ pub fn kanban(s: &App, k: &Kit) -> El {
         .gap(12.0)
         .padding(16.0)
         .items_start();
+    let recent = s.ws.recent();
     for (title, statuses) in COLUMNS {
-        let cards: Vec<&Thread> =
-            s.ws.recent()
-                .into_iter()
-                .filter(|t| statuses.contains(&t.status))
-                .collect();
-        let mut column = col().w_full().gap(8.0);
-        for t in &cards {
-            column = column.child(card(s, t, k));
-        }
-        if cards.is_empty() {
-            column = column.child(
-                text("Nothing here")
-                    .font(k.ty.small)
-                    .color(c.text_faint)
-                    .padding(10.0),
-            );
-        }
+        let cards: Rc<[Id]> = recent
+            .iter()
+            .filter(|t| statuses.contains(&t.status))
+            .map(|t| t.id.clone())
+            .collect();
+        let column = if cards.is_empty() {
+            text("Nothing here")
+                .font(k.ty.small)
+                .color(c.text_faint)
+                .padding(10.0)
+        } else {
+            let (keys, kit) = (cards.clone(), k.clone());
+            let ids = cards.clone();
+            col()
+                .w_full()
+                .growth(GrowthSpec::default())
+                .virtual_rows(
+                    cards.len(),
+                    86.0,
+                    move |_: &App, i| Cow::Owned(keys[i].clone()),
+                    move |s: &App, i| match s.ws.thread(&ids[i]) {
+                        // Virtual rows take no gap from their list.
+                        Some(t) => col()
+                            .w_full()
+                            .pb(if i + 1 < ids.len() { 8.0 } else { 0.0 })
+                            .child(card(s, t, &kit)),
+                        None => col(),
+                    },
+                )
+                .virtual_rows_version(&cards)
+        };
         board = board.child(
             col()
                 .key(format!("kanban-{title}"))

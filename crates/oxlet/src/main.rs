@@ -66,8 +66,16 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 message,
                 files,
             } => actions::apply_edits(s, &thread, &message, files, tx),
-            Event::Repo { cwd, result } => actions::apply_repo(s, cwd, result),
-            Event::Files { cwd, result } => actions::apply_files(s, cwd, result),
+            Event::Repo {
+                cwd,
+                generation,
+                result,
+            } => actions::apply_repo(s, cwd, generation, result, tx),
+            Event::Files {
+                cwd,
+                generation,
+                result,
+            } => actions::apply_files(s, cwd, generation, result),
             Event::Term(run, line) => actions::apply_terminal(s, run, line),
             Event::Prs(result) => s.prs = Some(result),
             Event::Providers(target, found) => {
@@ -106,6 +114,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             }
         }
     }
+    changed |= actions::sync_repo(s);
     if s.dirty && clock >= s.save_due {
         actions::save_now(s);
     }
@@ -213,12 +222,8 @@ fn quit(s: &mut App, _: &mut Tx) {
     if let Some(r) = &s.terminal.running {
         r.stop();
     }
-    s.dirty = false;
-    if !s.demo
-        && let Err(e) = store::save(&s.dir, &s.ws)
-    {
-        eprintln!("Could not save the workspace: {e}");
-    }
+    actions::save_now(s);
+    s.saver.flush();
 }
 
 fn scene_dark(s: &mut App) {

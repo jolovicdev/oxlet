@@ -340,7 +340,9 @@ fn edits_card(m: &Message, files: &[FileChange], s: &App, k: &Kit) -> El {
                 .on_press_tx(move |s: &mut App, tx| {
                     s.dock_tab = DockTab::Changes;
                     s.dock.set_open(true);
-                    if let Some(i) = s.repo.diff.file_index(&path) {
+                    if !s.repo.fresh || s.repo.reading {
+                        s.repo.reveal = Some(path.clone());
+                    } else if let Some(i) = s.repo.diff.file_index(&path) {
                         s.repo.diff.scroll_to_file(i, tx);
                     }
                 })

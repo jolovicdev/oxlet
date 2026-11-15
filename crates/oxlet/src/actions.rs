@@ -9,14 +9,20 @@ use oxlet_core::target::{self, Place, Target};
 use oxlet_core::{export, git, schedule, store, time};
 use rune::{FileDialogOptions, TextEdit, Tx};
 use rune_kit::diff::{self, DiffState, FileDiff};
+use rune_kit::{FileNode, TreeModel};
 
 use crate::state::{
-    AddMode, App, Event, Pending, Placement, RepoSnapshot, Screen, Toast, Turn, file_tree,
+    AddMode, App, DockTab, Event, Pending, Placement, RepoSnapshot, Screen, Toast, Turn, file_tree,
 };
 
 const SAVE_DELAY: f64 = 0.4;
 const MAX_TERMINAL_LINES: usize = 4000;
 const MAX_UNTRACKED_PREVIEW: u64 = 256 * 1024;
+/// Untracked files past these limits are listed by name only. Previews are diffed on the UI
+/// thread when the read lands, about 20 ms for 512 KB in a debug build, and their bytes cross
+/// the connection to a remote target.
+const MAX_UNTRACKED_FILES: usize = 200;
+const MAX_UNTRACKED_BYTES: u64 = 512 * 1024;
 
 pub fn now() -> u64 {
     time::now_ms()
@@ -846,7 +852,7 @@ fn collect_edits(s: &App, thread: &str, message: &str, edited: BTreeSet<String>)
             .into_iter()
             .filter(|path| !tracked.contains(path))
             .collect();
-        let texts = target::read_texts(&at, &new, u64::from(u32::MAX));
+        let texts = target::read_texts(&at, &new, u64::from(u32::MAX), u64::from(u32::MAX));
         for (path, text) in new.into_iter().zip(texts) {
             files.push(FileChange {
                 path,
@@ -1018,35 +1024,94 @@ pub fn run_command(s: &mut App, command: Command, arg: &str, tx: &mut Tx) {
     mark_dirty(s, tx);
 }
 
+/// Marks the repository as changed, and reads it again if it is on screen.
 pub fn refresh_repo(s: &mut App) {
+    let generation = s.repo.generation;
     let Some(cwd) = s.place() else {
-        s.repo = Default::default();
+        s.repo = crate::state::Repo {
+            generation,
+            ..Default::default()
+        };
         return;
     };
     ensure_providers(s, &cwd.target);
     if s.repo.cwd != cwd {
         s.repo = crate::state::Repo {
-            cwd: cwd.clone(),
+            cwd,
+            generation,
             ..Default::default()
         };
     }
-    s.repo.loading = true;
-    let c = cwd.clone();
-    s.bridge.spawn(move |b| {
-        let result = snapshot(&c);
-        b.send(Event::Repo { cwd: c, result });
-    });
-    s.bridge.spawn(move |b| {
-        let result = git::files(&cwd);
-        b.send(Event::Files { cwd, result });
-    });
+    s.repo.fresh = false;
+    if !sync_repo(s) && !s.repo.reading {
+        s.repo.loading = false;
+    }
 }
 
-fn snapshot(cwd: &Place) -> Result<RepoSnapshot, String> {
+/// What the screen shows of the repository: `Some(true)` for the dock's changes, files or git,
+/// `Some(false)` for only the branch on the new-thread screen.
+fn repo_shown(s: &App) -> Option<bool> {
+    if s.screen != Screen::Thread {
+        return None;
+    }
+    let dock =
+        s.dock.is_open() && matches!(s.dock_tab, DockTab::Changes | DockTab::Files | DockTab::Git);
+    (dock || s.selected.is_none()).then_some(dock)
+}
+
+/// Starts a read of the repository when what it holds is stale or less than the screen shows,
+/// and none runs. Returns whether it started one.
+pub fn sync_repo(s: &mut App) -> bool {
+    let Some(full) = repo_shown(s) else {
+        return false;
+    };
+    if s.repo.fresh && (s.repo.full || !full) || s.repo.reading || s.place().is_none() {
+        return false;
+    }
+    s.repo.fresh = true;
+    s.repo.full = full;
+    s.repo.reading = true;
+    s.repo.loading = true;
+    s.repo.generation += 1;
+    let (cwd, generation) = (s.repo.cwd.clone(), s.repo.generation);
+    let c = cwd.clone();
+    s.bridge.spawn(move |b| {
+        let result = snapshot(&c, full);
+        b.send(Event::Repo {
+            cwd: c,
+            generation,
+            result,
+        });
+    });
+    if full {
+        s.bridge.spawn(move |b| {
+            let result = git::files(&cwd).map(|files| (files.len(), file_tree(files)));
+            b.send(Event::Files {
+                cwd,
+                generation,
+                result,
+            });
+        });
+    }
+    true
+}
+
+/// The repository's status, and with `full` what the dock shows of it.
+fn snapshot(cwd: &Place, full: bool) -> Result<RepoSnapshot, String> {
     if !git::is_repo(cwd)? {
         return Err("Not a git repository".into());
     }
     let status = git::status(cwd)?;
+    if !full {
+        return Ok(RepoSnapshot {
+            status,
+            changes: Vec::new(),
+            patch: String::new(),
+            untracked: Vec::new(),
+            log: Vec::new(),
+            branches: Vec::new(),
+        });
+    }
     let patch = git::diff(cwd)?;
     let mut changes = git::numstat(cwd)?;
     let mut untracked = Vec::new();
@@ -1056,7 +1121,14 @@ fn snapshot(cwd: &Place) -> Result<RepoSnapshot, String> {
         .filter(|e| e.untracked())
         .map(|e| e.path.clone())
         .collect();
-    let texts = target::read_texts(cwd, &paths, MAX_UNTRACKED_PREVIEW);
+    let shown = paths.len().min(MAX_UNTRACKED_FILES);
+    let mut texts = target::read_texts(
+        cwd,
+        &paths[..shown],
+        MAX_UNTRACKED_PREVIEW,
+        MAX_UNTRACKED_BYTES,
+    );
+    texts.resize(paths.len(), String::new());
     for (path, text) in paths.into_iter().zip(texts) {
         changes.push(FileChange {
             path: path.clone(),
@@ -1075,12 +1147,23 @@ fn snapshot(cwd: &Place) -> Result<RepoSnapshot, String> {
     })
 }
 
-pub fn apply_repo(s: &mut App, cwd: Place, result: Result<RepoSnapshot, String>) {
-    if s.repo.cwd != cwd {
+pub fn apply_repo(
+    s: &mut App,
+    cwd: Place,
+    generation: u64,
+    result: Result<RepoSnapshot, String>,
+    tx: &mut Tx,
+) {
+    if s.repo.cwd != cwd || s.repo.generation != generation {
         return;
     }
+    s.repo.reading = false;
     s.repo.loading = false;
     match result {
+        Ok(snap) if !s.repo.full => {
+            s.repo.error = None;
+            s.repo.status = snap.status;
+        }
         Ok(snap) => {
             s.repo.error = None;
             s.repo.status = snap.status;
@@ -1099,15 +1182,26 @@ pub fn apply_repo(s: &mut App, cwd: Place, result: Result<RepoSnapshot, String>)
         }
         Err(e) => s.repo.error = Some(e),
     }
+    if s.repo.fresh
+        && let Some(path) = s.repo.reveal.take()
+        && let Some(i) = s.repo.diff.file_index(&path)
+    {
+        s.repo.diff.scroll_to_file(i, tx);
+    }
 }
 
-pub fn apply_files(s: &mut App, cwd: Place, result: Result<Vec<String>, String>) {
-    if s.repo.cwd != cwd {
+pub fn apply_files(
+    s: &mut App,
+    cwd: Place,
+    generation: u64,
+    result: Result<(usize, TreeModel<FileNode<String>>), String>,
+) {
+    if s.repo.cwd != cwd || s.repo.generation != generation {
         return;
     }
-    if let Ok(files) = result {
-        s.repo.file_count = files.len();
-        s.repo.files = file_tree(files);
+    if let Ok((count, files)) = result {
+        s.repo.file_count = count;
+        s.repo.files = files;
     }
 }
 
@@ -1246,6 +1340,7 @@ pub fn worktree_removed(s: &mut App, path: &str, result: Result<(), String>, tx:
             .iter_mut()
             .filter(|t| t.worktree.as_deref() == Some(path))
     {
+        let t = std::sync::Arc::make_mut(t);
         t.worktree = None;
         t.branch = None;
     }
@@ -1421,10 +1516,5 @@ pub fn save_now(s: &mut App) {
     if s.demo {
         return;
     }
-    let (ws, dir) = (s.ws.clone(), s.dir.clone());
-    s.bridge.spawn(move |b| {
-        if let Err(e) = store::save(&dir, &ws) {
-            b.send(Event::Notice(format!("Could not save: {e}")));
-        }
-    });
+    s.saver.save(s.ws.clone());
 }

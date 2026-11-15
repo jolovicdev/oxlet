@@ -2,45 +2,42 @@
 /// Higher is better: matches at word starts and runs of consecutive characters score more, and
 /// an earlier first match beats a later one. Case is ignored.
 pub fn score(query: &str, text: &str) -> Option<i32> {
-    let query: Vec<char> = query
+    let mut query = query
         .chars()
         .filter(|c| !c.is_whitespace())
         .flat_map(char::to_lowercase)
-        .collect();
-    if query.is_empty() {
+        .peekable();
+    if query.peek().is_none() {
         return Some(0);
     }
-    let chars: Vec<char> = text.chars().collect();
-    let lower: Vec<char> = chars
-        .iter()
-        .map(|c| c.to_lowercase().next().unwrap_or(*c))
-        .collect();
     let mut score = 0;
-    let mut qi = 0;
     let mut previous: Option<usize> = None;
     let mut first = None;
-    for (i, &c) in lower.iter().enumerate() {
-        if qi == query.len() {
+    let mut before: Option<char> = None;
+    for (i, c) in text.chars().enumerate() {
+        let Some(&wanted) = query.peek() else {
             break;
+        };
+        if c.to_lowercase().next().unwrap_or(c) == wanted {
+            let word_start = before
+                .is_none_or(|b| !b.is_alphanumeric() || (c.is_uppercase() && b.is_lowercase()));
+            score += 1;
+            if word_start {
+                score += 8;
+            }
+            if previous.is_some_and(|p| p + 1 == i) {
+                score += 5;
+            }
+            first.get_or_insert(i);
+            previous = Some(i);
+            query.next();
         }
-        if c != query[qi] {
-            continue;
-        }
-        let word_start = i == 0
-            || !chars[i - 1].is_alphanumeric()
-            || (chars[i].is_uppercase() && chars[i - 1].is_lowercase());
-        score += 1;
-        if word_start {
-            score += 8;
-        }
-        if previous.is_some_and(|p| p + 1 == i) {
-            score += 5;
-        }
-        first.get_or_insert(i);
-        previous = Some(i);
-        qi += 1;
+        before = Some(c);
     }
-    (qi == query.len()).then(|| score - first.unwrap_or(0).min(20) as i32)
+    query
+        .peek()
+        .is_none()
+        .then(|| score - first.unwrap_or(0).min(20) as i32)
 }
 
 #[cfg(test)]
