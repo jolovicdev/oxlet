@@ -3,10 +3,12 @@ use std::time::Duration;
 
 use rune::{Cx, El, Spring, col, icon, row, text};
 use rune_kit::shell::{PaneMotion, SidebarPeek, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Select};
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, Select,
+};
 use rune_theme_opencode::icons;
 
-use crate::state::{App, DockTab, Popup, Screen};
+use crate::state::{App, DockTab, Pending, Popup, Screen};
 use crate::{actions, composer, dock, pages, settings, sidebar, theme, thread};
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
@@ -75,12 +77,187 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
                 .build(&k)
         }
     };
+    confirm(s, &k, &mut layer);
     layer.extend(crate::palette::view(s, &k));
     if let Some(t) = &s.toast {
         layer.push(toast(&t.text, &k));
     }
     rune_kit::root(base, layer)
         .on_window_focus(|s: &mut App, focused, _| s.window_focused = focused)
+}
+
+fn plural(n: usize, one: &str) -> String {
+    format!("{n} {one}{}", if n == 1 { "" } else { "s" })
+}
+
+/// The dialog a destructive action waits in. It is worded from the state it would act on.
+fn confirm(s: &App, k: &Kit, layer: &mut Vec<El>) {
+    let Some(pending) = &s.confirm else {
+        return;
+    };
+    let worktree = |path: &str, branch: Option<&String>| match branch {
+        Some(b) => format!(
+            "The worktree at {path} is deleted with any uncommitted changes in it; the branch {b} stays."
+        ),
+        None => format!("The worktree at {path} is deleted with any uncommitted changes in it."),
+    };
+    let (title, detail, button) = match pending {
+        Pending::Discard(path) => {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            let new = s
+                .repo
+                .status
+                .entries
+                .iter()
+                .any(|e| e.path == *path && e.untracked());
+            let detail = if new {
+                format!("{path} is not committed, so it is deleted.")
+            } else {
+                format!("{path} goes back to its last commit. The changes cannot be recovered.")
+            };
+            (
+                format!("Discard {name}?"),
+                detail,
+                format!("Discard {name}"),
+            )
+        }
+        Pending::RemoveWorktree(id) => {
+            let Some(t) = s.ws.thread(id) else { return };
+            let path = t.worktree.clone().unwrap_or_default();
+            let sharing =
+                s.ws.threads
+                    .iter()
+                    .filter(|o| o.worktree.as_deref() == Some(path.as_str()))
+                    .count();
+            let detail = format!(
+                "{} {} on in the project folder.",
+                worktree(&path, t.branch.as_ref()),
+                if sharing > 1 {
+                    format!("Its {} carry", plural(sharing, "thread"))
+                } else {
+                    "The thread carries".to_owned()
+                }
+            );
+            (
+                "Remove this worktree?".to_owned(),
+                detail,
+                "Remove worktree".to_owned(),
+            )
+        }
+        Pending::DeleteThread(id) => {
+            let Some(t) = s.ws.thread(id) else { return };
+            let mut detail = "Its messages are deleted for good.".to_owned();
+            if let Some(path) = &t.worktree
+                && !s
+                    .ws
+                    .threads
+                    .iter()
+                    .any(|o| o.id != t.id && o.worktree.as_ref() == Some(path))
+            {
+                detail = format!("{detail} {}", worktree(path, t.branch.as_ref()));
+            }
+            (
+                format!("Delete \u{201c}{}\u{201d}?", t.title),
+                detail,
+                "Delete thread".to_owned(),
+            )
+        }
+        Pending::DeleteAutomation(id) => {
+            let Some(a) = s.ws.automations.iter().find(|a| a.id == *id) else {
+                return;
+            };
+            (
+                format!("Delete \u{201c}{}\u{201d}?", a.name),
+                "It stops running. Threads it has opened stay.".to_owned(),
+                "Delete automation".to_owned(),
+            )
+        }
+        Pending::RestoreAppearance => (
+            "Restore appearance defaults?".to_owned(),
+            "Theme, colours, fonts, text size, density and time format go back to their defaults."
+                .to_owned(),
+            "Restore defaults".to_owned(),
+        ),
+        Pending::RemoveProject(id) => {
+            let Some(p) = s.ws.project(id) else { return };
+            let threads: Vec<_> = s.ws.threads.iter().filter(|t| t.project == p.id).collect();
+            let automations =
+                s.ws.automations
+                    .iter()
+                    .filter(|a| a.project == p.id)
+                    .count();
+            let mut worktrees: Vec<&str> = threads
+                .iter()
+                .filter_map(|t| t.worktree.as_deref())
+                .filter(|w| {
+                    !s.ws
+                        .threads
+                        .iter()
+                        .any(|o| o.project != p.id && o.worktree.as_deref() == Some(w))
+                })
+                .collect();
+            worktrees.sort_unstable();
+            worktrees.dedup();
+            let mut detail = format!("Its {} go with it", plural(threads.len(), "thread"));
+            if automations > 0 {
+                detail = format!("{detail}, and its {}", plural(automations, "automation"));
+            }
+            detail = format!(
+                "{detail}; running turns stop. The folder {} stays as it is.",
+                p.path
+            );
+            if !worktrees.is_empty() {
+                detail = format!(
+                    "{detail} The threads\u{2019} {} deleted with any uncommitted changes; their branches stay.",
+                    if worktrees.len() == 1 {
+                        "worktree is".to_owned()
+                    } else {
+                        format!("{} worktrees are", worktrees.len())
+                    }
+                );
+            }
+            (
+                format!("Remove {}?", p.name),
+                detail,
+                "Remove project".to_owned(),
+            )
+        }
+    };
+    let buttons = row()
+        .key("confirm-buttons")
+        .w_full()
+        .px(16.0)
+        .pb(16.0)
+        .gap(8.0)
+        .justify_end()
+        .child(
+            Button::new("Cancel")
+                .on_press(|s: &mut App| s.confirm = None)
+                .build(k)
+                .key("confirm-cancel"),
+        )
+        .child(
+            Button::new(button)
+                .variant(ButtonVariant::Danger)
+                .on_press_tx(actions::confirmed)
+                .build(k)
+                .key("confirm-ok"),
+        );
+    // The kit's description line does not wrap, and a path can be long.
+    let detail = text(detail)
+        .font(k.ty.ui)
+        .color(k.c.text_muted)
+        .wrap()
+        .px(16.0)
+        .pb(16.0);
+    Dialog::new("confirm", title)
+        .width(440.0)
+        .fit()
+        .open(true)
+        .on_close(|s: &mut App| s.confirm = None)
+        .child(detail)
+        .child(buttons)
+        .build(k, layer);
 }
 
 fn ms(n: u64) -> Duration {
@@ -357,9 +534,12 @@ fn hero(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         }
         return out;
     }
-    let names: Vec<&str> = s.ws.projects.iter().map(|p| p.name.as_str()).collect();
-    let current = s.current_project().map(|p| p.name.as_str());
-    let picker = Select::new("project", &names)
+    let labels = s.project_labels();
+    let current = s
+        .current_project()
+        .and_then(|c| s.ws.projects.iter().position(|p| p.id == c.id))
+        .map(|i| labels[i].as_str());
+    let picker = Select::new("project", &labels)
         .label("Project")
         .current(current)
         .open(s.popup == Some(Popup::Project))
@@ -372,11 +552,9 @@ fn hero(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         })
         .on_close(|s: &mut App| s.popup = None)
         .on_choose(|s: &mut App, v: &str, _| {
-            s.draft_project =
-                s.ws.projects
-                    .iter()
-                    .find(|p| p.name == v)
-                    .map(|p| p.id.clone());
+            if let Some(i) = s.project_labels().iter().position(|l| l == v) {
+                s.draft_project = Some(s.ws.projects[i].id.clone());
+            }
             s.popup = None;
             actions::refresh_repo(s);
         })

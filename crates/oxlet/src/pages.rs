@@ -1,5 +1,4 @@
 use oxlet_core::model::{Automation, Schedule, Thread, ThreadStatus};
-use oxlet_core::provider::ProviderId;
 use oxlet_core::time;
 use rune::{El, ScrollSpec, TextEdit, col, icon, row, text};
 use rune_kit::{
@@ -9,7 +8,7 @@ use rune_kit::{
 use rune_theme_opencode::icons;
 
 use crate::actions::{self, mark_dirty, notice};
-use crate::state::{App, Popup};
+use crate::state::{App, Pending, Popup};
 use crate::theme;
 
 const COLUMNS: [(&str, &[ThreadStatus]); 5] = [
@@ -121,6 +120,9 @@ fn card(s: &App, t: &Thread, k: &Kit) -> El {
         .border(1.0, c.border_weak)
         .hover(c.hover)
         .cursor(rune::Cursor::Pointer)
+        .role("button")
+        .label(t.title.clone())
+        .focusable(true)
         .on_press_tx(move |s: &mut App, tx| actions::select_thread(s, &id, tx))
         .child(
             row()
@@ -199,12 +201,15 @@ pub fn pull_requests(s: &App, k: &Kit) -> El {
                 .padding(16.0),
         );
     }
+    // The list is the current project's repository: only its threads can match.
+    let project = s.current_project().map(|p| p.id.as_str());
     for pr in list {
         let url = pr.url.clone();
         let thread = s
             .ws
             .threads
             .iter()
+            .filter(|t| !t.archived && Some(t.project.as_str()) == project)
             .find(|t| t.branch.as_deref() == Some(&pr.branch) || t.pull_request == Some(pr.number))
             .map(|t| t.id.clone());
         let (label, variant) = match (pr.state.as_str(), pr.draft) {
@@ -223,6 +228,9 @@ pub fn pull_requests(s: &App, k: &Kit) -> El {
             .radius(k.radius.md)
             .hover(c.hover)
             .cursor(rune::Cursor::Pointer)
+            .role("link")
+            .label(pr.title.clone())
+            .focusable(true)
             .on_press_tx(move |_: &mut App, tx| {
                 let _ = tx.open_url(&url);
             })
@@ -313,16 +321,17 @@ pub fn automations(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
 
 fn form(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let c = &k.c;
-    let names: Vec<&str> = s.ws.projects.iter().map(|p| p.name.as_str()).collect();
-    let project = s
+    let labels = s.project_labels();
+    let current = s
         .auto_project
         .as_deref()
-        .and_then(|id| s.ws.project(id))
-        .or(s.ws.projects.first());
-    let project_select = Select::new("auto-project", &names)
+        .and_then(|id| s.ws.projects.iter().position(|p| p.id == id))
+        .or((!s.ws.projects.is_empty()).then_some(0))
+        .map(|i| labels[i].as_str());
+    let project_select = Select::new("auto-project", &labels)
         .label("Project")
         .placeholder("Project")
-        .current(project.map(|p| p.name.as_str()))
+        .current(current)
         .open(s.popup == Some(Popup::NewAutomationProject))
         .on_toggle(|s: &mut App| {
             s.popup = if s.popup == Some(Popup::NewAutomationProject) {
@@ -333,11 +342,9 @@ fn form(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         })
         .on_close(|s: &mut App| s.popup = None)
         .on_choose(|s: &mut App, v: &str, _| {
-            s.auto_project =
-                s.ws.projects
-                    .iter()
-                    .find(|p| p.name == v)
-                    .map(|p| p.id.clone());
+            if let Some(i) = s.project_labels().iter().position(|l| l == v) {
+                s.auto_project = Some(s.ws.projects[i].id.clone());
+            }
             s.popup = None;
         })
         .build(k, layer);
@@ -417,11 +424,12 @@ fn create(s: &mut App, tx: &mut rune::Tx) {
         notice(s, tx, "Give the automation a name and a prompt");
         return;
     }
-    let provider =
+    let Some(provider) =
         s.ws.project(&project)
-            .and_then(|p| p.default_provider)
-            .or(s.ws.settings.default_provider)
-            .unwrap_or(ProviderId::Claude);
+            .map(|p| actions::default_provider(s, p))
+    else {
+        return;
+    };
     let id = s.ws.new_id("a");
     s.ws.automations.push(Automation {
         id,
@@ -446,7 +454,10 @@ fn automation_row(s: &App, i: usize, a: &Automation, k: &Kit) -> El {
         s.ws.project(&a.project)
             .map_or("missing project", |p| p.name.as_str());
     let last = a.last_run.map_or("Never run".to_owned(), |t| {
-        format!("Last run {} ago", time::ago(t, actions::now()))
+        match time::ago(t, actions::now()) {
+            ago if ago == "now" => "Last run just now".to_owned(),
+            ago => format!("Last run {ago} ago"),
+        }
     });
     row()
         .key(format!("automation-{}", a.id))
@@ -464,11 +475,12 @@ fn automation_row(s: &App, i: usize, a: &Automation, k: &Kit) -> El {
                 .child(text(a.name.clone()).font(k.ty.ui_medium).color(c.text_base))
                 .child(
                     text(format!(
-                        "{} · {} · {} · {} runs",
+                        "{} · {} · {} · {} run{}",
                         a.schedule.label(),
                         project,
                         last,
-                        a.runs.len()
+                        a.runs.len(),
+                        if a.runs.len() == 1 { "" } else { "s" }
                     ))
                     .font(k.ty.small)
                     .color(c.text_faint)
@@ -499,11 +511,9 @@ fn automation_row(s: &App, i: usize, a: &Automation, k: &Kit) -> El {
                 .variant(IconButtonVariant::GhostMuted)
                 .control_size(ControlSize::Small)
                 .label("Delete automation")
-                .on_press_tx(move |s: &mut App, tx| {
-                    if i < s.ws.automations.len() {
-                        s.ws.automations.remove(i);
-                    }
-                    mark_dirty(s, tx);
+                .on_press({
+                    let id = a.id.clone();
+                    move |s: &mut App| s.confirm = Some(Pending::DeleteAutomation(id.clone()))
                 })
                 .build(k)
                 .key(format!("automation-delete-{}", a.id)),

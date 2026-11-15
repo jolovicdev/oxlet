@@ -129,20 +129,25 @@ fn assistant_message(s: &App, t: &Thread, m: &Message, k: &Kit) -> El {
     let mut out = col().w_full().gap(12.0);
     out = out.child(reply_header(s, t, m, k));
     let mut tools: Vec<(&str, &str)> = Vec::new();
-    let flush = |out: El, tools: &mut Vec<(&str, &str)>| {
+    // The index of the group's first part keys it: stable while tools arrive, and unique.
+    let mut first = 0;
+    let flush = |out: El, tools: &mut Vec<(&str, &str)>, first: usize| {
         if tools.is_empty() {
             return out;
         }
-        let el = tool_group(s, m, tools, k);
+        let el = tool_group(s, m, first, tools, k);
         tools.clear();
         out.child(el)
     };
     for (i, part) in m.parts.iter().enumerate() {
         if let Part::Tool { name, summary, .. } = part {
+            if tools.is_empty() {
+                first = i;
+            }
             tools.push((name, summary));
             continue;
         }
-        out = flush(out, &mut tools);
+        out = flush(out, &mut tools, first);
         out = match part {
             Part::Text { text } => out.child(
                 Markdown::new(text.clone())
@@ -174,7 +179,7 @@ fn assistant_message(s: &App, t: &Thread, m: &Message, k: &Kit) -> El {
             Part::Tool { .. } => out,
         };
     }
-    out = flush(out, &mut tools);
+    out = flush(out, &mut tools, first);
     if live {
         out = out.child(
             row()
@@ -189,9 +194,9 @@ fn assistant_message(s: &App, t: &Thread, m: &Message, k: &Kit) -> El {
     out
 }
 
-fn tool_group(s: &App, m: &Message, tools: &[(&str, &str)], k: &Kit) -> El {
+fn tool_group(s: &App, m: &Message, first: usize, tools: &[(&str, &str)], k: &Kit) -> El {
     let c = &k.c;
-    let key = format!("{}-tools{}", m.id, tools.len());
+    let key = format!("{}-tools{first}", m.id);
     let open = s.expanded.contains(&key);
     let hidden = tools.len().saturating_sub(TOOLS_SHOWN);
     let shown = if open { tools } else { &tools[hidden..] };

@@ -11,12 +11,14 @@ use crate::theme;
 
 const PLACEHOLDER: &str = "Ask anything, @tag files/folders, or use / to show available commands";
 
-/// `(provider, model id, label)` for every model the picker offers.
+/// `(provider, model id, label)` for every model the picker offers: the shown providers' and
+/// the open thread's own. A label two providers share names its provider, so it picks one.
 fn models(s: &App) -> Vec<(ProviderId, String, String)> {
     let custom = &s.ws.settings.custom_models;
-    PROVIDERS
+    let own = s.thread().map(|t| t.provider);
+    let mut all: Vec<(ProviderId, String, String)> = PROVIDERS
         .iter()
-        .filter(|p| !s.ws.settings.hidden_providers.contains(&p.id))
+        .filter(|p| !s.ws.settings.hidden_providers.contains(&p.id) || own == Some(p.id))
         .flat_map(|p| {
             let listed = p.models.iter().map(move |(id, label)| {
                 let label = match label.strip_prefix(p.name).map(str::trim_start) {
@@ -32,7 +34,14 @@ fn models(s: &App) -> Vec<(ProviderId, String, String)> {
                 .map(|(pid, id)| (*pid, id.clone(), id.clone()));
             listed.chain(extra)
         })
-        .collect()
+        .collect();
+    let labels: Vec<String> = all.iter().map(|(_, _, l)| l.clone()).collect();
+    for (p, _, label) in &mut all {
+        if labels.iter().filter(|l| *l == label).count() > 1 {
+            *label = format!("{label} · {}", p.info().name);
+        }
+    }
+    all
 }
 
 pub fn view(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -60,16 +69,22 @@ pub fn view(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
 
     let (provider, model, effort, access, mode) = match thread {
         Some(t) => (t.provider, t.model.as_str(), t.effort, t.access, t.mode),
-        None => (
-            s.current_project()
-                .and_then(|p| p.default_provider)
-                .or(s.ws.settings.default_provider)
-                .unwrap_or(ProviderId::Claude),
-            "",
-            Effort::default(),
-            s.ws.settings.default_access,
-            ChatMode::Default,
-        ),
+        None => {
+            let provider = s
+                .current_project()
+                .map_or(ProviderId::Claude, |p| actions::default_provider(s, p));
+            let model = match &s.draft_model {
+                Some((p, m)) if *p == provider => m.as_str(),
+                _ => "",
+            };
+            (
+                provider,
+                model,
+                s.draft_effort,
+                s.ws.settings.default_access,
+                s.draft_mode,
+            )
+        }
     };
 
     let access_labels: Vec<&str> = AccessMode::ALL.iter().map(|m| m.label()).collect();
@@ -214,10 +229,11 @@ pub fn view(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .on_toggle(|s: &mut App| toggle(s, Popup::Effort))
                 .on_close(|s: &mut App| s.popup = None)
                 .on_choose(|s: &mut App, v: &str, tx| {
-                    if let Some(e) = Effort::ALL.into_iter().find(|e| e.label() == v)
-                        && let Some(t) = s.selected.clone().and_then(|id| s.ws.thread_mut(&id))
-                    {
-                        t.effort = e;
+                    if let Some(e) = Effort::ALL.into_iter().find(|e| e.label() == v) {
+                        match s.selected.clone().and_then(|id| s.ws.thread_mut(&id)) {
+                            Some(t) => t.effort = e,
+                            None => s.draft_effort = e,
+                        }
                         mark_dirty(s, tx);
                     }
                     s.popup = None;
@@ -360,15 +376,16 @@ fn toggle(s: &mut App, p: Popup) {
 fn choose_model(s: &mut App, provider: ProviderId, model: &str, tx: &mut Tx) {
     match s.selected.clone() {
         Some(id) => {
+            if s.ws.thread(&id).is_some_and(|t| t.provider != provider) {
+                actions::reset_session(s, &id);
+            }
             if let Some(t) = s.ws.thread_mut(&id) {
-                if t.provider != provider {
-                    t.session = None;
-                }
                 t.provider = provider;
                 t.model = model.to_owned();
             }
         }
         None => {
+            s.draft_model = Some((provider, model.to_owned()));
             s.ws.settings.default_provider = Some(provider);
             if let Some(p) = s
                 .draft_project
@@ -382,28 +399,35 @@ fn choose_model(s: &mut App, provider: ProviderId, model: &str, tx: &mut Tx) {
     mark_dirty(s, tx);
 }
 
-fn on_key(s: &mut App, ev: &rune::KeyEvent, _: &mut Tx) -> bool {
-    if s.slash_dismissed {
-        return false;
-    }
-    let Some(hits) = slash::suggestions(&s.composer.text).filter(|h| !h.is_empty()) else {
-        return false;
-    };
-    match ev.key {
-        Key::Up => s.slash_active = (s.slash_active + hits.len() - 1) % hits.len(),
-        Key::Down => s.slash_active = (s.slash_active + 1) % hits.len(),
-        Key::Tab => {
-            let name = hits[s.slash_active.min(hits.len() - 1)].name;
-            s.composer = rune::TextEdit::new(format!("/{name} "));
-            s.composer.focused = true;
+fn on_key(s: &mut App, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    if !s.slash_dismissed
+        && let Some(hits) = slash::suggestions(&s.composer.text).filter(|h| !h.is_empty())
+    {
+        match ev.key {
+            Key::Up => s.slash_active = (s.slash_active + hits.len() - 1) % hits.len(),
+            Key::Down => s.slash_active = (s.slash_active + 1) % hits.len(),
+            Key::Tab => {
+                let name = hits[s.slash_active.min(hits.len() - 1)].name;
+                s.composer = rune::TextEdit::new(format!("/{name} "));
+                s.composer.focused = true;
+            }
+            Key::Escape => s.slash_dismissed = true,
+            _ => return false,
         }
-        Key::Escape => s.slash_dismissed = true,
-        _ => return false,
+        return true;
     }
-    true
+    // The field would take these as a blur and caret moves before the window's shortcuts see
+    // them, and it is focused nearly all the time.
+    if ev.key == Key::Escape || (ev.mods.alt && matches!(ev.key, Key::Up | Key::Down)) {
+        return crate::on_key(s, ev, tx);
+    }
+    false
 }
 
 fn slash_popup(s: &App, k: &Kit, layer: &mut Vec<El>) {
+    if s.slash_dismissed {
+        return;
+    }
     let Some(hits) = slash::suggestions(&s.composer.text) else {
         return;
     };

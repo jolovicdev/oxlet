@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use oxlet_core::model::{Thread, ThreadStatus};
+use oxlet_core::model::{Project, Thread, ThreadStatus};
 use oxlet_core::time::{self, Bucket};
 use rune::{El, TextEdit, Tx, icon, row, text};
 use rune_kit::shell::{RowStatus, Sidebar, SidebarRow, SidebarSection};
@@ -8,7 +8,7 @@ use rune_kit::{IconButton, IconButtonVariant, Kit, Menu, MenuItem, TextInput, co
 use rune_theme_opencode::icons;
 
 use crate::actions::{self, mark_dirty};
-use crate::state::{AddMode, App, Popup, Screen, Section};
+use crate::state::{AddMode, App, Pending, Popup, Screen, Section};
 use crate::theme;
 
 fn compact(s: &App) -> bool {
@@ -105,7 +105,7 @@ pub fn view(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             .icon(&icons::SETTINGS_GEAR)
             .height(nav_h(s))
             .detail(shortcut(","))
-            .on_select(|s: &mut App, _| s.screen = Screen::Settings(Section::General))
+            .on_select(|s: &mut App, _| actions::go(s, Screen::Settings(Section::General)))
             .build(k)
             .key("nav-settings"),
     )
@@ -216,12 +216,7 @@ fn destinations(s: &App, k: &Kit) -> El {
             .checked(on)
             .focusable(true)
             .help(label)
-            .on_press(move |s: &mut App| {
-                s.screen = screen;
-                if screen == Screen::PullRequests {
-                    actions::load_prs(s);
-                }
-            })
+            .on_press(move |s: &mut App| actions::go(s, screen))
             .child(icon(glyph, 15.0).color(if on { c.icon_base } else { c.icon_muted }));
         if screen == Screen::Automations && automations > 0 {
             cell = cell.child(
@@ -376,7 +371,23 @@ fn projects(s: &App, k: &Kit, layer: &mut Vec<El>) -> SidebarSection {
         if let Some(place) = p.target.label() {
             r = r.detail(place.to_owned());
         }
-        rows.push(r.build(k).key(format!("project-{}", p.id)));
+        if s.renaming.as_deref() == Some(p.id.as_str()) {
+            r = r.renaming(
+                &s.rename,
+                |s: &mut App| &mut s.rename,
+                commit_rename,
+                |s: &mut App, _| s.renaming = None,
+            );
+        }
+        let id = p.id.clone();
+        let built = r
+            .build(k)
+            .key(format!("project-{}", p.id))
+            .on_secondary_press(move |s: &mut App, at, _| s.project_menu = Some((id.clone(), at)));
+        rows.push(match &s.project_menu {
+            Some((menu_id, point)) if *menu_id == p.id => project_menu(p, built, *point, k, layer),
+            _ => built,
+        });
     }
     SidebarSection::new("Projects")
         .key("section-projects")
@@ -384,6 +395,33 @@ fn projects(s: &App, k: &Kit, layer: &mut Vec<El>) -> SidebarSection {
         .on_toggle(|s: &mut App, _| s.toggle_collapsed("projects"))
         .action(add)
         .rows(rows)
+}
+
+fn project_menu(
+    p: &Project,
+    trigger: El,
+    point: rune::PointerPress,
+    k: &Kit,
+    layer: &mut Vec<El>,
+) -> El {
+    let (rename, remove) = (p.id.clone(), p.id.clone());
+    context_menu("project-menu", trigger, Some(point))
+        .item(MenuItem::new("Rename").on_select(move |s: &mut App| {
+            s.project_menu = None;
+            start_rename(s, &rename);
+        }))
+        .separator()
+        .item(
+            MenuItem::new("Remove…")
+                .icon(&icons::OUTLINE_TRASH)
+                .danger(true)
+                .on_select(move |s: &mut App| {
+                    s.project_menu = None;
+                    s.confirm = Some(Pending::RemoveProject(remove.clone()));
+                }),
+        )
+        .on_close(|s: &mut App| s.project_menu = None)
+        .build(k, layer)
 }
 
 fn subtitle(s: &App, t: &Thread) -> String {
@@ -517,22 +555,28 @@ pub fn archive(s: &mut App, id: &str, tx: &mut Tx) {
     mark_dirty(s, tx);
 }
 
+/// Starts renaming a thread or a project: ids are unique across both.
 fn start_rename(s: &mut App, id: &str) {
-    if let Some(t) = s.ws.thread(id) {
-        s.rename = TextEdit::new(t.title.clone());
-        s.rename.anchor = 0;
-        s.rename.focused = true;
-        s.renaming = Some(id.to_owned());
-    }
+    let name = match (s.ws.thread(id), s.ws.project(id)) {
+        (Some(t), _) => t.title.clone(),
+        (None, Some(p)) => p.name.clone(),
+        (None, None) => return,
+    };
+    s.rename = TextEdit::new(name);
+    s.rename.anchor = 0;
+    s.rename.focused = true;
+    s.renaming = Some(id.to_owned());
 }
 
 fn commit_rename(s: &mut App, tx: &mut Tx) {
-    let title = s.rename.text.trim().to_owned();
-    if let Some(id) = s.renaming.take()
-        && !title.is_empty()
-        && let Some(t) = s.ws.thread_mut(&id)
-    {
-        t.title = title;
-        mark_dirty(s, tx);
+    let name = s.rename.text.trim().to_owned();
+    let Some(id) = s.renaming.take().filter(|_| !name.is_empty()) else {
+        return;
+    };
+    if let Some(t) = s.ws.thread_mut(&id) {
+        t.title = name;
+    } else if let Some(p) = s.ws.projects.iter_mut().find(|p| p.id == id) {
+        p.name = name;
     }
+    mark_dirty(s, tx);
 }

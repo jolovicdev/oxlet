@@ -4,7 +4,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use oxlet_core::git::{self, Commit, PullRequest};
-use oxlet_core::model::{FileChange, Id, Workspace};
+use oxlet_core::model::{ChatMode, Effort, FileChange, Id, Workspace};
 use oxlet_core::process::Running;
 use oxlet_core::provider::{AgentEvent, ProviderId};
 use oxlet_core::target::{Place, Target};
@@ -79,6 +79,8 @@ pub enum Popup {
     Access,
     Model,
     Effort,
+    DefaultProvider,
+    DefaultAccess,
     Project,
     Workspace,
     NewAutomationProject,
@@ -93,6 +95,19 @@ pub enum Popup {
 pub enum AddMode {
     Path,
     Ssh,
+}
+
+/// A destructive action waiting for the user to confirm it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// A changed file in the dock's folder, by path.
+    Discard(String),
+    /// The worktree a thread works in.
+    RemoveWorktree(Id),
+    DeleteThread(Id),
+    DeleteAutomation(Id),
+    RestoreAppearance,
+    RemoveProject(Id),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,7 +134,11 @@ pub struct Terminal {
     pub lines: Vec<(bool, String)>,
     pub input: TextEdit,
     pub running: Option<Running>,
+    /// Which command `running` is: lines from an earlier one are dropped.
+    pub run: u64,
     pub history: Vec<String>,
+    /// The history entry Up and Down have put in the input.
+    pub history_at: Option<usize>,
 }
 
 pub struct Turn {
@@ -129,6 +148,10 @@ pub struct Turn {
     pub edited: BTreeSet<String>,
     /// The text part deltas are being written into, until its complete block arrives.
     pub live: Option<usize>,
+    /// The thread's session epoch when the turn started; its session id is stale after a reset.
+    pub epoch: u64,
+    /// The turn summarises the thread for a fresh session to continue from.
+    pub compact: bool,
 }
 
 /// What a worker reads from a repository. Diff models are built on the UI thread: they hold `Rc`s.
@@ -159,7 +182,7 @@ pub enum Event {
         cwd: Place,
         result: Result<Vec<String>, String>,
     },
-    Term(oxlet_core::process::Line),
+    Term(u64, oxlet_core::process::Line),
     Prs(Result<Vec<PullRequest>, String>),
     Providers(Target, Vec<(ProviderId, Option<PathBuf>)>),
     Distros(Vec<String>),
@@ -180,6 +203,11 @@ pub enum Event {
     GitDone {
         cwd: Place,
         result: Result<String, String>,
+        committed: bool,
+    },
+    WorktreeRemoved {
+        path: String,
+        result: Result<(), String>,
     },
 }
 
@@ -224,11 +252,17 @@ pub struct App {
     pub selected: Option<Id>,
     pub draft_project: Option<Id>,
     pub placement: Placement,
+    /// Choices made on the new-thread screen, for the thread its first message creates.
+    pub draft_model: Option<(ProviderId, String)>,
+    pub draft_effort: Effort,
+    pub draft_mode: ChatMode,
     pub sidebar: PaneState,
     pub dock: PaneState,
     pub dock_tab: DockTab,
     pub popup: Option<Popup>,
     pub thread_menu: Option<(Id, rune::PointerPress)>,
+    pub project_menu: Option<(Id, rune::PointerPress)>,
+    pub confirm: Option<Pending>,
     pub collapsed: Vec<&'static str>,
     pub expanded: HashSet<String>,
 
@@ -265,6 +299,8 @@ pub struct App {
     pub ssh_hosts: Vec<String>,
     pub window_focused: bool,
     pub turns: HashMap<Id, Turn>,
+    /// Bumped per thread whenever its session is dropped.
+    pub epochs: HashMap<Id, u64>,
     pub queued: HashMap<Id, VecDeque<String>>,
     pub waiting_worktree: HashSet<Id>,
     pub repo: Repo,
@@ -291,11 +327,16 @@ impl App {
             selected: None,
             draft_project: None,
             placement: Placement::Local,
+            draft_model: None,
+            draft_effort: Effort::default(),
+            draft_mode: ChatMode::default(),
             sidebar: PaneState::new(300.0).range(200.0, 480.0),
             dock: PaneState::new(520.0).range(360.0, 900.0).collapsed(),
             dock_tab: DockTab::Changes,
             popup: None,
             thread_menu: None,
+            project_menu: None,
+            confirm: None,
             collapsed: vec!["earlier"],
             expanded: HashSet::new(),
             composer: TextEdit::new(""),
@@ -326,6 +367,7 @@ impl App {
             ssh_hosts: Vec::new(),
             window_focused: true,
             turns: HashMap::new(),
+            epochs: HashMap::new(),
             queued: HashMap::new(),
             waiting_worktree: HashSet::new(),
             repo: Repo::default(),
@@ -333,7 +375,9 @@ impl App {
                 lines: Vec::new(),
                 input: TextEdit::new(""),
                 running: None,
+                run: 0,
                 history: Vec::new(),
+                history_at: None,
             },
             prs: None,
             toast: None,
@@ -395,6 +439,23 @@ impl App {
             .iter()
             .find(|(p, _)| *p == id)
             .map(|(_, b)| b.clone())
+    }
+
+    /// Project names for a picker, with the path added where two share a name.
+    pub fn project_labels(&self) -> Vec<String> {
+        let projects = &self.ws.projects;
+        projects
+            .iter()
+            .map(|p| {
+                if projects.iter().filter(|q| q.name == p.name).count() < 2 {
+                    p.name.clone()
+                } else if let Some(place) = p.target.label() {
+                    format!("{} · {place}:{}", p.name, p.path)
+                } else {
+                    format!("{} · {}", p.name, p.path)
+                }
+            })
+            .collect()
     }
 
     pub fn is_collapsed(&self, key: &str) -> bool {

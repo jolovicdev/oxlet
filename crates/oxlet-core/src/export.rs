@@ -8,13 +8,18 @@ pub fn markdown(thread: &Thread) -> String {
         out.push_str(&format!("> Goal: {goal}\n\n"));
     }
     for m in &thread.messages {
-        let who = match m.role {
-            Role::User => "You",
-            Role::Assistant => thread.provider.info().name,
-            Role::System => "Oxlet",
+        let who = match (m.role, &m.agent) {
+            (Role::User, _) => "You",
+            (Role::Assistant, Some((provider, _))) => provider.info().name,
+            (Role::Assistant, None) => thread.provider.info().name,
+            (Role::System, _) => "Oxlet",
         };
         out.push_str(&format!("## {who}\n\n"));
         for part in &m.parts {
+            // A paragraph straight after a bullet would read as part of it.
+            if !matches!(part, Part::Tool { .. }) && out.ends_with("\n") && !out.ends_with("\n\n") {
+                out.push('\n');
+            }
             match part {
                 Part::Text { text } => out.push_str(&format!("{text}\n\n")),
                 Part::Tool { name, summary, .. } => {
@@ -75,6 +80,30 @@ pub fn write(thread: &Thread, dir: &Path) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replies_name_their_own_agent_and_text_after_tools_starts_a_paragraph() {
+        use crate::model::Workspace;
+        use crate::provider::ProviderId;
+        let mut w = Workspace::default();
+        let p = w.add_project("/x");
+        let t = w.create_thread(&p, ProviderId::Codex, "", 1);
+        let parts = vec![
+            Part::Tool {
+                name: "Read".into(),
+                summary: "a.rs".into(),
+                output: String::new(),
+            },
+            Part::Text {
+                text: "Done.".into(),
+            },
+        ];
+        let m = w.push_message(&t, Role::Assistant, parts, 2).unwrap();
+        let thread = w.thread_mut(&t).unwrap();
+        thread.messages[0].agent = Some((ProviderId::Claude, String::new()));
+        assert_eq!(m, thread.messages[0].id);
+        assert!(markdown(thread).contains("## Claude\n\n- `Read` a.rs\n\nDone.\n"));
+    }
 
     #[test]
     fn slugs_are_file_safe() {

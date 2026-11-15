@@ -76,7 +76,7 @@ pub const COMMANDS: &[Spec] = &[
         command: Command::Compact,
         name: "compact",
         title: "Compact",
-        description: "Summarise the thread and start a fresh session",
+        description: "Summarise the thread, then continue in a fresh session",
     },
     Spec {
         command: Command::Clear,
@@ -130,7 +130,7 @@ pub fn parse(input: &str) -> Option<(Command, &str)> {
 
 /// The commands to offer while the composer holds `/query` and nothing after it.
 pub fn suggestions(input: &str) -> Option<Vec<&'static Spec>> {
-    let query = input.strip_prefix('/')?;
+    let query = input.trim_start().strip_prefix('/')?;
     if query.contains(char::is_whitespace) {
         return None;
     }
@@ -169,5 +169,6 @@ mod tests {
         assert_eq!(suggestions("/").unwrap().len(), COMMANDS.len());
         assert!(suggestions("/goal x").is_none());
         assert!(suggestions("goal").is_none());
+        assert_eq!(suggestions("  /cle").unwrap()[0].name, "clear");
     }
 }

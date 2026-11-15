@@ -62,7 +62,7 @@ pub fn clock(l: Local, h24: bool) -> String {
 pub fn stamp(at: u64, now: u64, offset: i64, h24: bool) -> String {
     let (a, n) = (local(at, offset), local(now, offset));
     match n.day - a.day {
-        0 => clock(a, h24),
+        i64::MIN..=0 => clock(a, h24),
         1 => format!("Yesterday {}", clock(a, h24)),
         2..=6 => format!("{} {}", WEEKDAYS[a.weekday as usize], clock(a, h24)),
         _ => format!("{} days ago", n.day - a.day),
@@ -122,6 +122,7 @@ mod tests {
         assert_eq!(stamp(now - 60_000, now, 0, true), "9:59");
         assert_eq!(stamp(now - DAY, now, 0, false), "Yesterday 10:00 AM");
         assert_eq!(stamp(now - 3 * DAY, now, 0, true), "Sunday 10:00");
+        assert_eq!(stamp(now + DAY, now, 0, true), "10:00");
         assert_eq!(bucket(now - DAY, now, 0), Bucket::Yesterday);
         assert_eq!(bucket(now - 9 * DAY, now, 0), Bucket::Earlier);
         assert_eq!(ago(now - 7_200_000, now), "2h");

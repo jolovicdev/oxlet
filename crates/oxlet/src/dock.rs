@@ -10,7 +10,7 @@ use rune_kit::{
 use rune_theme_opencode::icons;
 
 use crate::actions::{self, mark_dirty};
-use crate::state::{App, DockTab};
+use crate::state::{App, DockTab, Pending};
 use crate::theme;
 use crate::thread::counts;
 
@@ -175,7 +175,7 @@ fn changes(s: &App, k: &Rc<Kit>) -> El {
                 .variant(IconButtonVariant::GhostMuted)
                 .control_size(ControlSize::Small)
                 .label("Discard changes")
-                .on_press(move |s: &mut App| actions::discard(s, path.clone()))
+                .on_press(move |s: &mut App| s.confirm = Some(Pending::Discard(path.clone())))
                 .build(&kit)
         })
         .build(s, k);
@@ -349,18 +349,30 @@ fn terminal(s: &App, k: &Kit) -> El {
             TextInput::new(&s.terminal.input)
                 .width(None)
                 .plain()
-                .placeholder(s.place().map(|at| at.cwd).unwrap_or_default())
+                .placeholder(s.place().map_or_else(String::new, |at| {
+                    format!(
+                        "{}  (each command starts here; cd does not carry over)",
+                        at.cwd
+                    )
+                }))
                 .text_style(mono)
                 .on_edit(|s: &mut App| &mut s.terminal.input)
                 .on_key(|s: &mut App, ev, _| {
-                    if ev.key == Key::Up
-                        && let Some(last) = s.terminal.history.last()
-                    {
-                        s.terminal.input = TextEdit::new(last.clone());
-                        s.terminal.input.focused = true;
-                        return true;
+                    let t = &mut s.terminal;
+                    if t.history.is_empty() {
+                        return false;
                     }
-                    false
+                    let at = match (&ev.key, t.history_at) {
+                        (Key::Up, None) => t.history.len().checked_sub(1),
+                        (Key::Up, Some(i)) => Some(i.saturating_sub(1)),
+                        (Key::Down, Some(i)) if i + 1 < t.history.len() => Some(i + 1),
+                        (Key::Down, Some(_)) => None,
+                        _ => return false,
+                    };
+                    t.history_at = at;
+                    t.input = TextEdit::new(at.map_or("", |i| t.history[i].as_str()));
+                    t.input.focused = true;
+                    true
                 })
                 .on_submit(actions::run_terminal)
                 .build(k)
@@ -572,11 +584,24 @@ fn notes(s: &App, k: &Kit) -> El {
         })
         .build(k)
         .key("goal-input");
-    let notes = TextArea::new(&s.notes)
+    let edit = if s.notes_for.as_deref() == Some(t.id.as_str()) {
+        s.notes.clone()
+    } else {
+        TextEdit::new(t.notes.clone())
+    };
+    let notes = TextArea::new(&edit)
         .width(None)
         .placeholder("Notes for this thread")
         .auto_grow(8, 30)
-        .on_edit(|s: &mut App| &mut s.notes)
+        .on_edit(|s: &mut App| {
+            // One editor serves every thread; it takes up the open thread's notes on its first edit.
+            if s.notes_for != s.selected {
+                let text = s.thread().map(|t| t.notes.clone()).unwrap_or_default();
+                s.notes = TextEdit::new(text);
+                s.notes_for = s.selected.clone();
+            }
+            &mut s.notes
+        })
         .on_change(|s: &mut App, tx| {
             if let Some(id) = s.notes_for.clone()
                 && let Some(t) = s.ws.thread_mut(&id)

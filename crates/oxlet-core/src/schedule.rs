@@ -4,23 +4,24 @@ use crate::time::local;
 const MINUTE: u64 = 60_000;
 const HOUR: u64 = 60 * MINUTE;
 
-/// Whether `a` should run at `now`. A daily schedule runs once in its hour; the 20-hour floor keeps
-/// it from running twice when the clock or the zone moves.
+/// Whether `a` should run at `now`. A daily schedule runs in its hour, once for each time it
+/// falls due: a run by hand at another time does not stand in for the next one.
 pub fn is_due(a: &Automation, now: u64, offset: i64) -> bool {
     if !a.enabled {
         return false;
     }
     let since = a.last_run.map(|t| now.saturating_sub(t));
     let at = local(now, offset);
+    // Time into the local hour: while `at.hour` is the schedule's, the hour began at its due time.
+    let into_hour = ((now / 1000) as i64 + offset).rem_euclid(3600) as u64 * 1000 + now % 1000;
+    let unrun = a.last_run.is_none_or(|t| t < now.saturating_sub(into_hour));
     match a.schedule {
         Schedule::EveryMinutes { minutes } => {
             since.is_none_or(|s| s >= u64::from(minutes.max(1)) * MINUTE)
         }
         Schedule::Hourly => since.is_none_or(|s| s >= HOUR),
-        Schedule::Daily { hour } => at.hour == hour && since.is_none_or(|s| s >= 20 * HOUR),
-        Schedule::Weekdays { hour } => {
-            at.weekday < 5 && at.hour == hour && since.is_none_or(|s| s >= 20 * HOUR)
-        }
+        Schedule::Daily { hour } => at.hour == hour && unrun,
+        Schedule::Weekdays { hour } => at.weekday < 5 && at.hour == hour && unrun,
     }
 }
 
@@ -65,7 +66,7 @@ mod tests {
             monday_9,
             0
         ));
-        assert!(!is_due(
+        assert!(is_due(
             &auto(Schedule::Daily { hour: 9 }, Some(monday_9 - 10 * MINUTE)),
             monday_9,
             0
@@ -73,6 +74,22 @@ mod tests {
         assert!(!is_due(
             &auto(Schedule::Daily { hour: 10 }, None),
             monday_9,
+            0
+        ));
+        let ran_by_hand = monday_9 - 18 * HOUR;
+        assert!(is_due(
+            &auto(Schedule::Daily { hour: 9 }, Some(ran_by_hand)),
+            monday_9 + 10 * MINUTE,
+            0
+        ));
+        assert!(!is_due(
+            &auto(Schedule::Weekdays { hour: 9 }, Some(monday_9 - 20 * MINUTE)),
+            monday_9,
+            1800
+        ));
+        assert!(!is_due(
+            &auto(Schedule::Daily { hour: 9 }, Some(monday_9 + 5 * MINUTE)),
+            monday_9 + 50 * MINUTE,
             0
         ));
         let saturday_9 = monday_9 + 5 * 24 * HOUR;

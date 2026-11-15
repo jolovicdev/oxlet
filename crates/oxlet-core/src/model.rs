@@ -519,7 +519,10 @@ impl Workspace {
     }
 
     pub fn add_project_on(&mut self, target: Target, path: &str) -> Id {
-        let path = path.trim_end_matches('/').to_owned();
+        let path = match path.trim_end_matches('/') {
+            "" if path.starts_with('/') => "/".to_owned(),
+            trimmed => trimmed.to_owned(),
+        };
         if let Some(p) = self
             .projects
             .iter()
@@ -580,6 +583,8 @@ impl Workspace {
         id
     }
 
+    /// A copy of thread `id` that continues in the same folder. Its pull request stays the
+    /// source's.
     pub fn fork_thread(&mut self, id: &str, now: u64) -> Option<Id> {
         let source = self.thread(id)?.clone();
         let new = self.new_id("t");
@@ -589,6 +594,8 @@ impl Workspace {
             parent: Some(source.id.clone()),
             session: None,
             status: ThreadStatus::Idle,
+            pull_request: None,
+            archived: false,
             pinned: false,
             unread: false,
             created: now,
@@ -700,6 +707,8 @@ mod tests {
             w.add_project("/a/b")
         );
         assert_eq!(w.projects[1].target, host);
+        let root = w.add_project("/");
+        assert_eq!(w.project(&root).unwrap().path, "/");
     }
 
     #[test]
@@ -728,11 +737,14 @@ mod tests {
         let p = w.add_project("/x");
         let t = w.create_thread(&p, ProviderId::Claude, "m", 1);
         w.push_message(&t, Role::User, vec![Part::Text { text: "hi".into() }], 2);
+        let source = w.thread_mut(&t).unwrap();
+        (source.pull_request, source.archived) = (Some(7), true);
         let f = w.fork_thread(&t, 5).unwrap();
         let fork = w.thread(&f).unwrap();
         assert_eq!(fork.parent.as_deref(), Some(t.as_str()));
         assert_eq!(fork.messages.len(), 1);
         assert!(fork.session.is_none());
+        assert_eq!((fork.pull_request, fork.archived), (None, false));
     }
 
     #[test]

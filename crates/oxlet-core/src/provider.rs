@@ -196,6 +196,10 @@ pub fn arguments(id: ProviderId, req: &TurnRequest) -> Vec<String> {
             if let Some(s) = &req.session {
                 a.extend(["--resume".into(), s.clone()]);
             }
+            // So a prompt that starts with `-` is not read as an option.
+            if id == ProviderId::Claude {
+                a.push("--".into());
+            }
             a.push(prompt);
         }
         ProviderId::Codex => {
@@ -215,22 +219,19 @@ pub fn arguments(id: ProviderId, req: &TurnRequest) -> Vec<String> {
             }
             a.extend([
                 "-c".into(),
-                format!(
-                    "model_reasoning_effort=\"{}\"",
-                    req.effort.label().to_lowercase()
-                ),
+                format!("model_reasoning_effort=\"{}\"", req.effort.id()),
             ]);
             if let Some(s) = &req.session {
                 a.extend(["resume".into(), s.clone()]);
             }
-            a.push(prompt);
+            a.extend(["--".into(), prompt]);
         }
         ProviderId::OpenCode => {
             a.push("run".into());
             if let Some(m) = model {
                 a.extend(["-m".into(), m]);
             }
-            a.push(prompt);
+            a.extend(["--".into(), prompt]);
         }
         ProviderId::Gemini => {
             if let Some(m) = model {
@@ -279,6 +280,8 @@ pub enum AgentEvent {
     ToolOutput(String),
     Usage(crate::model::Usage),
     Edited(String),
+    /// Something to tell the user that does not end the turn, such as a reconnect.
+    Notice(String),
     Done {
         duration_ms: Option<u64>,
         error: Option<String>,
@@ -330,7 +333,7 @@ fn claude_event(v: &Value) -> Vec<AgentEvent> {
             for block in content.into_iter().flatten() {
                 match str_at(block, "type") {
                     Some("text") => {
-                        if let Some(t) = str_at(block, "text").filter(|t| !t.trim().is_empty()) {
+                        if let Some(t) = str_at(block, "text") {
                             out.push(AgentEvent::Text(t.to_owned()));
                         }
                     }
@@ -496,7 +499,7 @@ fn codex_event(v: &Value) -> Vec<AgentEvent> {
                 error: None,
             });
         }
-        Some("turn.failed") | Some("error") => {
+        Some("turn.failed") => {
             let message = v
                 .pointer("/error/message")
                 .and_then(Value::as_str)
@@ -506,6 +509,12 @@ fn codex_event(v: &Value) -> Vec<AgentEvent> {
                 duration_ms: None,
                 error: Some(message.to_owned()),
             });
+        }
+        // Codex keeps going after an `error` (it retries); `turn.failed` or its exit ends the turn.
+        Some("error") => {
+            if let Some(message) = str_at(v, "message") {
+                out.push(AgentEvent::Notice(message.to_owned()));
+            }
         }
         _ => {}
     }
@@ -537,7 +546,13 @@ mod tests {
         ));
         assert!(joined.contains("--model claude-sonnet-5-5"));
         assert!(joined.contains("--resume abc"));
-        assert_eq!(a.last().unwrap(), "fix it");
+        assert!(joined.ends_with("-- fix it"));
+        let mut dash = req();
+        dash.prompt = "-v is broken".into();
+        for id in [ProviderId::Claude, ProviderId::Codex, ProviderId::OpenCode] {
+            let a = arguments(id, &dash);
+            assert_eq!(a[a.len() - 2..], ["--", "-v is broken"], "{id:?}");
+        }
     }
 
     #[test]
@@ -550,6 +565,11 @@ mod tests {
         assert!(a.windows(2).any(|w| w == ["--sandbox", "read-only"]));
         assert!(!a.iter().any(|x| x == "-m"));
         assert!(a.last().unwrap().starts_with("Plan only."));
+        r.effort = Effort::ExtraHigh;
+        r.session = Some("th".into());
+        let a = arguments(ProviderId::Codex, &r);
+        assert!(a.contains(&"model_reasoning_effort=\"xhigh\"".to_owned()));
+        assert!(a.join(" ").contains("resume th -- Plan only."));
     }
 
     #[test]
@@ -627,6 +647,7 @@ mod tests {
             r#"{"type":"item.completed","item":{"type":"command_execution","command":"cargo test","aggregated_output":"ok","exit_code":0}}"#,
             r#"{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"a.rs","kind":"update"}]}}"#,
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"All green."}}"#,
+            r#"{"type":"error","message":"Reconnecting... 2/5"}"#,
             r#"{"type":"turn.failed","error":{"message":"quota"}}"#,
             "not json",
         ];
@@ -644,14 +665,15 @@ mod tests {
         );
         assert_eq!(events[3], AgentEvent::Edited("a.rs".into()));
         assert_eq!(events[4], AgentEvent::Text("All green.".into()));
+        assert_eq!(events[5], AgentEvent::Notice("Reconnecting... 2/5".into()));
         assert_eq!(
-            events[5],
+            events[6],
             AgentEvent::Done {
                 duration_ms: None,
                 error: Some("quota".into())
             }
         );
-        assert_eq!(events.len(), 6);
+        assert_eq!(events.len(), 7);
     }
 
     #[test]

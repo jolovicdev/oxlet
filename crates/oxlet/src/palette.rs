@@ -138,6 +138,7 @@ fn ranked(s: &App, query: &str) -> Vec<Entry> {
 
 fn run(s: &mut App, item: Item, tx: &mut Tx) {
     s.palette = None;
+    s.popup = None;
     match item {
         Item::NewThread => actions::new_thread(s),
         Item::Thread(id) => actions::select_thread(s, &id, tx),
@@ -145,14 +146,9 @@ fn run(s: &mut App, item: Item, tx: &mut Tx) {
             s.draft_project = Some(id);
             actions::new_thread(s);
         }
-        Item::Go(screen) => {
-            s.screen = screen;
-            if screen == Screen::PullRequests {
-                actions::load_prs(s);
-            }
-        }
+        Item::Go(screen) => actions::go(s, screen),
         Item::Dock(tab) => {
-            s.screen = Screen::Thread;
+            actions::go(s, Screen::Thread);
             s.dock_tab = tab;
             s.dock.set_open(true);
             actions::refresh_repo(s);
@@ -162,7 +158,17 @@ fn run(s: &mut App, item: Item, tx: &mut Tx) {
             tx.color_motion(rune::tok::motion::CALM);
             actions::mark_dirty(s, tx);
         }
-        Item::Slash(command) => actions::run_command(s, command, "", tx),
+        // A command acts on the open thread, so it is shown; the goal is its argument, so that
+        // command waits in the composer for one.
+        Item::Slash(command) => {
+            actions::go(s, Screen::Thread);
+            if command == Command::Goal {
+                s.composer = TextEdit::new(format!("/{} ", slash::spec(command).name));
+                s.composer.focused = true;
+            } else {
+                actions::run_command(s, command, "", tx);
+            }
+        }
     }
 }
 

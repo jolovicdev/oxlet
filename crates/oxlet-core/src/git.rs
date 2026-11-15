@@ -17,6 +17,8 @@ pub struct Status {
 pub struct Entry {
     pub path: String,
     pub code: String,
+    /// Where a renamed or copied file came from.
+    pub from: Option<String>,
 }
 
 impl Entry {
@@ -74,10 +76,13 @@ pub fn parse_status(text: &str) -> Status {
             }
         } else if line.len() > 3 {
             let path = &line[3..];
-            let path = path.split_once(" -> ").map_or(path, |(_, to)| to);
+            let (from, path) = path
+                .split_once(" -> ")
+                .map_or((None, path), |(from, to)| (Some(from), to));
             s.entries.push(Entry {
                 path: path.trim_matches('"').to_owned(),
                 code: line[..2].to_owned(),
+                from: from.map(|f| f.trim_matches('"').to_owned()),
             });
         }
     }
@@ -157,12 +162,32 @@ pub fn push(at: &Place) -> Result<(), String> {
     git(at, &["push", "-u", "origin", "HEAD"]).map(drop)
 }
 
-pub fn discard(at: &Place, path: &str, untracked: bool) -> Result<(), String> {
-    if untracked {
-        git(at, &["clean", "-f", "--", path]).map(drop)
-    } else {
-        git(at, &["checkout", "HEAD", "--", path]).map(drop)
+/// Puts `entry` back as HEAD has it: an untracked file is deleted, a staged new one too, and a
+/// rename returns to its old name.
+pub fn discard(at: &Place, entry: &Entry) -> Result<(), String> {
+    if entry.untracked() {
+        return git(at, &["clean", "-f", "--", &entry.path]).map(drop);
     }
+    let mut args = vec![
+        "restore",
+        "--source=HEAD",
+        "--staged",
+        "--worktree",
+        "--",
+        &entry.path,
+    ];
+    args.extend(entry.from.as_deref());
+    git(at, &args).map(drop)
+}
+
+/// The ones of `paths` that git tracks.
+pub fn tracked(at: &Place, paths: &[String]) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["ls-files", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    Ok(git(at, &args)?.lines().map(str::to_owned).collect())
 }
 
 pub fn worktree_add(repo: &Place, path: &str, branch: &str) -> Result<(), String> {
@@ -255,6 +280,7 @@ mod tests {
         assert_eq!((s.ahead, s.behind), (2, 1));
         let paths: Vec<_> = s.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, ["src/a.rs", "new.rs", "notes.md"]);
+        assert_eq!(s.entries[1].from.as_deref(), Some("old.rs"));
         assert!(s.entries[2].untracked());
     }
 
@@ -306,8 +332,19 @@ mod tests {
         );
         assert!(diff(cwd).unwrap().contains("+two"));
         assert_eq!(log(cwd, 5).unwrap()[0].subject, "first");
-        discard(cwd, "a.txt", false).unwrap();
+        std::fs::write(dir.join("b.txt"), "new\n").unwrap();
+        git(cwd, &["add", "b.txt"]).unwrap();
+        git(cwd, &["mv", "a.txt", "c.txt"]).unwrap();
+        assert_eq!(
+            tracked(cwd, &["c.txt".into(), "d.txt".into()]).unwrap(),
+            ["c.txt"]
+        );
+        for entry in status(cwd).unwrap().entries {
+            discard(cwd, &entry).unwrap();
+        }
         assert!(status(cwd).unwrap().entries.is_empty());
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
+        assert!(!dir.join("b.txt").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

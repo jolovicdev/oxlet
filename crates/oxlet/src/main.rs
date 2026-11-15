@@ -15,11 +15,12 @@ mod view;
 
 use std::time::Duration;
 
+use oxlet_core::target::Target;
 use oxlet_core::{store, time};
 use rune::{AppSpec, Chrome, KeyEvent, Tx, Waker};
 use rune_kit::shell;
 
-use crate::state::{App, DockTab, Event, Popup, Screen, Section};
+use crate::state::{App, DockTab, Event, Pending, Popup, Screen, Section};
 
 const AUTOMATION_INTERVAL: f64 = 30.0;
 
@@ -67,7 +68,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             } => actions::apply_edits(s, &thread, &message, files, tx),
             Event::Repo { cwd, result } => actions::apply_repo(s, cwd, result),
             Event::Files { cwd, result } => actions::apply_files(s, cwd, result),
-            Event::Term(line) => actions::apply_terminal(s, line),
+            Event::Term(run, line) => actions::apply_terminal(s, run, line),
             Event::Prs(result) => s.prs = Some(result),
             Event::Providers(target, found) => {
                 s.providers.insert(target, found);
@@ -83,15 +84,25 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 actions::worktree_ready(s, &thread, result, tx)
             }
             Event::Notice(text) => actions::notice(s, tx, text),
-            Event::GitDone { cwd, result } => {
+            Event::GitDone {
+                cwd,
+                result,
+                committed,
+            } => {
                 match result {
                     Ok(msg) if !msg.is_empty() => actions::notice(s, tx, msg),
                     Ok(_) => {}
                     Err(e) => actions::notice(s, tx, e),
                 }
                 if s.repo.cwd == cwd {
+                    if committed {
+                        s.commit_message = rune::TextEdit::new("");
+                    }
                     actions::refresh_repo(s);
                 }
+            }
+            Event::WorktreeRemoved { path, result } => {
+                actions::worktree_removed(s, &path, result, tx)
             }
         }
     }
@@ -102,7 +113,8 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
         s.toast = None;
         changed = true;
     }
-    if clock >= s.next_automation_check {
+    // Until detection here answers, every provider would read as not installed.
+    if clock >= s.next_automation_check && s.providers.contains_key(&Target::Local) {
         s.next_automation_check = clock + AUTOMATION_INTERVAL;
         if !s.demo {
             actions::run_due_automations(s, tx);
@@ -122,7 +134,7 @@ fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if ev.is_command(',') {
-        s.screen = Screen::Settings(Section::General);
+        actions::go(s, Screen::Settings(Section::General));
         return true;
     }
     if ev.is_command('k') {
@@ -163,14 +175,17 @@ fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if ev.is_command('`') {
-        s.screen = Screen::Thread;
+        actions::go(s, Screen::Thread);
         s.dock_tab = DockTab::Terminal;
         s.dock.set_open(true);
         s.terminal.input.focused = true;
         return true;
     }
     if ev.key == rune::Key::Escape {
-        if s.popup.take().is_some() || s.thread_menu.take().is_some() {
+        if s.popup.take().is_some()
+            || s.thread_menu.take().is_some()
+            || s.project_menu.take().is_some()
+        {
             return true;
         }
         if s.editing.is_some() {
@@ -178,7 +193,7 @@ fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             return true;
         }
         if matches!(s.screen, Screen::Settings(_)) {
-            s.screen = Screen::Thread;
+            actions::go(s, Screen::Thread);
             return true;
         }
         if let Some(id) = s.selected.clone().filter(|id| s.turns.contains_key(id)) {
@@ -187,6 +202,23 @@ fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
     }
     false
+}
+
+/// The app is going: no turn or command outlives it, and what changed since the last save is
+/// written before the process ends.
+fn quit(s: &mut App, _: &mut Tx) {
+    for turn in s.turns.values() {
+        turn.running.stop();
+    }
+    if let Some(r) = &s.terminal.running {
+        r.stop();
+    }
+    s.dirty = false;
+    if !s.demo
+        && let Err(e) = store::save(&s.dir, &s.ws)
+    {
+        eprintln!("Could not save the workspace: {e}");
+    }
 }
 
 fn scene_dark(s: &mut App) {
@@ -274,6 +306,12 @@ fn scene_terminal(s: &mut App) {
     ];
 }
 
+fn scene_confirm(s: &mut App) {
+    s.screen = Screen::Thread;
+    s.dock.set_open(true);
+    s.confirm = Some(Pending::Discard("src/notes.md".into()));
+}
+
 type Scene = (&'static str, fn(&mut App));
 
 const SCENES: &[Scene] = &[
@@ -291,6 +329,7 @@ const SCENES: &[Scene] = &[
     ("settings", scene_settings),
     ("providers", scene_providers),
     ("terminal", scene_terminal),
+    ("confirm", scene_confirm),
 ];
 
 fn main() {
@@ -315,6 +354,7 @@ fn main() {
         ..AppSpec::new("Oxlet", (1280.0, 820.0), init, view::view)
     })
     .chrome(chrome)
+    .on_quit(quit)
     .run();
 }
 

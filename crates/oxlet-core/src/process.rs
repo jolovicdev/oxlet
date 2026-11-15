@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +16,8 @@ pub struct Running {
     child: Arc<Mutex<Option<Child>>>,
     pid: u32,
     stopped: Arc<AtomicBool>,
+    /// Set once the child is reaped, after which its pid may belong to another process.
+    exited: Arc<AtomicBool>,
     /// Closes the stdin of a target's client, which ends the remote program.
     close: Option<Sender<()>>,
 }
@@ -26,8 +28,10 @@ impl Running {
         if let Some(close) = &self.close {
             let _ = close.send(());
         }
-        if let Some(child) = self.child.lock().unwrap().as_mut() {
+        if !self.exited.load(Ordering::SeqCst) {
             kill_tree(self.pid);
+        }
+        if let Some(child) = self.child.lock().unwrap().as_mut() {
             let _ = child.kill();
         }
     }
@@ -118,29 +122,26 @@ pub fn spawn_lines(
     let err_sink = sink.clone();
     let err_reader = thread::spawn(move || {
         if let Some(err) = stderr {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
-                err_sink(Line::Err(line));
-            }
+            each_line(err, |line| err_sink(Line::Err(line)));
         }
     });
 
     let waiter = shared.clone();
-    let exited = close.clone();
+    let exited = Arc::new(AtomicBool::new(false));
+    let reaped = exited.clone();
+    let closer = close.clone();
     thread::spawn(move || {
         if let Some(out) = stdout {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                sink(Line::Out(line));
-            }
+            each_line(out, |line| sink(Line::Out(line)));
         }
         let _ = err_reader.join();
-        let code = waiter
-            .lock()
-            .unwrap()
-            .take()
-            .and_then(|mut c| c.wait().ok())
-            .and_then(|s| s.code());
-        if let Some(exited) = exited {
-            let _ = exited.send(());
+        // Taken out of the lock before waiting: a program that closed its output can run on,
+        // and `stop` needs the lock meanwhile.
+        let child = waiter.lock().unwrap().take();
+        let code = child.and_then(|mut c| c.wait().ok()).and_then(|s| s.code());
+        reaped.store(true, Ordering::SeqCst);
+        if let Some(closer) = closer {
+            let _ = closer.send(());
         }
         sink(Line::Exit(code));
     });
@@ -148,8 +149,25 @@ pub fn spawn_lines(
         child: shared,
         pid,
         stopped,
+        exited,
         close,
     })
+}
+
+/// Calls `f` with each line of `from`. Bytes that are not UTF-8 are replaced, not the end of it.
+fn each_line(from: impl Read, mut f: impl FnMut(String)) {
+    let mut reader = BufReader::new(from);
+    let mut line = Vec::new();
+    while matches!(reader.read_until(b'\n', &mut line), Ok(n) if n > 0) {
+        if line.ends_with(b"\n") {
+            line.pop();
+            if line.ends_with(b"\r") {
+                line.pop();
+            }
+        }
+        f(String::from_utf8_lossy(&line).into_owned());
+        line.clear();
+    }
 }
 
 /// Runs a shell command line the way a terminal would.
@@ -308,6 +326,44 @@ mod tests {
         let got: Vec<String> = rx.iter().take(3).collect();
         assert!(got.contains(&"out:one".to_owned()) && got.contains(&"err:two".to_owned()));
         assert_eq!(got.last().unwrap(), "exit:Some(3)");
+    }
+
+    #[test]
+    fn output_that_is_not_utf8_reads_through_to_the_exit() {
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        spawn_shell("printf 'a\\377b\\nnext\\n'", &Place::local("/"), move |l| {
+            if let Line::Out(t) | Line::Err(t) = l {
+                tx.lock().unwrap().send(t).unwrap();
+            }
+        })
+        .unwrap();
+        let got: Vec<String> = rx.iter().take(2).collect();
+        assert_eq!(got, ["a\u{FFFD}b", "next"]);
+    }
+
+    #[test]
+    fn stopping_a_program_that_closed_its_output_ends_it_at_once() {
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        let running = spawn_shell(
+            "exec sleep 30 >/dev/null 2>&1",
+            &Place::local("/"),
+            move |l| {
+                if let Line::Exit(_) = l {
+                    tx.lock().unwrap().send(()).unwrap();
+                }
+            },
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let start = std::time::Instant::now();
+        running.stop();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "stop waited for the program"
+        );
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 
     #[test]

@@ -6,7 +6,7 @@ use oxlet_core::provider::ProviderId;
 use oxlet_core::target::{Place, Target};
 use rune::{Env, Runtime, TextEdit};
 
-use crate::state::App;
+use crate::state::{App, Pending, Screen, Section};
 
 struct Sandbox {
     root: PathBuf,
@@ -89,7 +89,11 @@ fn runtime(sandbox: &Sandbox, providers: Vec<(ProviderId, Option<PathBuf>)>) -> 
     rt
 }
 
+/// Clicks `key` once panes and popups have finished moving.
 fn click(rt: &mut Runtime<App>, key: &str) {
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
     let (x, y) = rt
         .find(key)
         .unwrap_or_else(|| panic!("no element keyed {key}"));
@@ -119,6 +123,29 @@ fn click_send(rt: &mut Runtime<App>, text: &str) {
     });
     rt.frame(1.0 / 60.0);
     click(rt, "composer-send");
+}
+
+fn press(rt: &mut Runtime<App>, key: rune::Key) {
+    rt.key(rune::KeyEvent {
+        key,
+        mods: Default::default(),
+    });
+    rt.frame(1.0 / 60.0);
+}
+
+fn type_text(rt: &mut Runtime<App>, text: &str) {
+    for c in text.chars() {
+        press(rt, rune::Key::Text(c.to_string()));
+    }
+}
+
+/// The arguments of each turn `name` ran, oldest first.
+fn turns(sb: &Sandbox, name: &str) -> Vec<String> {
+    sb.args(name)
+        .split("<<turn>>\n")
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Runs frames and polls until `done` holds, as the window would while workers report back.
@@ -204,6 +231,7 @@ fn a_codex_turn_reads_json_events_and_reports_failures() {
     let codex = sb.agent(
         "codex",
         r#"echo '{"type":"thread.started","thread_id":"th-9"}'
+echo '{"type":"error","message":"Reconnecting... 2/5"}'
 echo '{"type":"item.completed","item":{"type":"command_execution","command":"cargo test","aggregated_output":"ok","exit_code":0}}'
 echo '{"type":"item.completed","item":{"type":"agent_message","text":"Tests pass."}}'
 echo '{"type":"turn.completed","usage":{}}'"#,
@@ -276,16 +304,13 @@ fn escape_stops_a_running_turn() {
     let mut rt = runtime(&sb, vec![(ProviderId::Claude, Some(claude))]);
     send(&mut rt, "long job");
     assert!(!rt.state.turns.is_empty());
-    rt.update(|s, tx| {
-        crate::on_key(
-            s,
-            &rune::KeyEvent {
-                key: rune::Key::Escape,
-                mods: Default::default(),
-            },
-            tx,
-        );
-    });
+    rt.update(|s, _| s.confirm = Some(Pending::Discard("README.md".into())));
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, rune::Key::Escape);
+    assert!(rt.state.confirm.is_none(), "Escape closes the dialog");
+    assert!(!rt.state.turns.is_empty(), "and only the dialog");
+    assert!(rt.state.composer.focused);
+    press(&mut rt, rune::Key::Escape);
     pump(&mut rt, idle);
     let t = thread(&rt);
     assert_eq!(t.status, ThreadStatus::Idle);
@@ -325,32 +350,38 @@ fn a_partial_slash_command_completes_before_it_runs() {
 
 #[test]
 fn every_screen_builds_with_a_populated_workspace() {
-    let mut app = App::new(
-        crate::demo::workspace(
-            oxlet_core::time::now_ms(),
-            Path::new(".").to_str().unwrap(),
-        ),
-        PathBuf::from("/nonexistent"),
-        0,
-    );
-    app.demo = true;
-    let mut rt = Runtime::new(
-        app,
-        crate::view::view,
-        (1400.0, 900.0),
-        Env {
-            system_dark: false,
-            scale: 1.0,
-        },
-    );
-    rt.frame(0.0);
-    for (_, scene) in crate::SCENES {
-        rt.update(|s, _| scene(s));
+    for (name, scene) in crate::SCENES {
+        let mut app = App::new(
+            crate::demo::workspace(oxlet_core::time::now_ms(), Path::new(".").to_str().unwrap()),
+            PathBuf::from("/nonexistent"),
+            0,
+        );
+        app.demo = true;
+        scene(&mut app);
+        let mut rt = Runtime::new(
+            app,
+            crate::view::view,
+            (1400.0, 900.0),
+            Env {
+                system_dark: false,
+                scale: 1.0,
+            },
+        );
         for _ in 0..3 {
             rt.frame(1.0 / 60.0);
         }
+        let shown = match *name {
+            "dock" | "terminal" => "dock",
+            "new" | "add" => "hero",
+            "palette" => "palette",
+            "kanban" => "kanban-Backlog",
+            "automations" => "automation-form",
+            "settings" | "providers" => "settings",
+            "confirm" => "confirm-ok",
+            _ => "transcript",
+        };
+        assert!(rt.find(shown).is_some(), "scene {name} shows no {shown}");
     }
-    assert!(rt.find("settings").is_some() || rt.find("transcript").is_some());
 }
 
 #[test]
@@ -437,6 +468,8 @@ fn claude_text_streams_in_as_deltas_then_settles_on_the_complete_block() {
   printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$piece"
 done
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Hello, world"}]}}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":" "}}}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":" "}]}}'
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}'
 echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Done"}}}'
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}'
@@ -494,6 +527,11 @@ fn retry_replaces_the_latest_reply() {
     });
     let texts: Vec<String> = thread(&rt).messages.iter().map(|m| m.text()).collect();
     assert_eq!(texts, ["hello", "re: hello"]);
+    let turns = turns(&sb, "claude");
+    assert!(
+        !turns[1].contains("--resume"),
+        "a retry starts a fresh session"
+    );
 }
 
 #[test]
@@ -715,4 +753,590 @@ fn stopping_an_ssh_turn_ends_the_remote_program() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!alive(), "the remote agent outlived its stopped turn");
+}
+
+#[test]
+fn discarding_a_file_waits_for_confirmation() {
+    let sb = Sandbox::new("discard");
+    let repo = PathBuf::from(sb.repo());
+    std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+    let mut rt = runtime(&sb, vec![]);
+    rt.update(|s, _| crate::actions::refresh_repo(s));
+    pump(&mut rt, |s| s.repo.changes.len() == 1);
+    rt.update(|s, _| s.confirm = Some(Pending::Discard("README.md".into())));
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("confirm-ok").is_some());
+    assert_eq!(
+        std::fs::read_to_string(repo.join("README.md")).unwrap(),
+        "changed\n"
+    );
+    click(&mut rt, "confirm-ok");
+    pump(&mut rt, |s| s.repo.changes.is_empty() && !s.repo.loading);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("README.md")).unwrap(),
+        "hello\n"
+    );
+}
+
+/// A thread in its own worktree, after one finished turn.
+fn worktree_thread(sb: &Sandbox, rt: &mut Runtime<App>) -> (String, String) {
+    let root = sb.root.join("worktrees").to_string_lossy().into_owned();
+    rt.update(|s, _| {
+        s.ws.settings.worktree_root = root;
+        s.placement = crate::state::Placement::Worktree;
+    });
+    send(rt, "one");
+    pump(rt, |s| {
+        idle(s) && s.thread().is_some_and(|t| t.worktree.is_some())
+    });
+    let t = thread(rt);
+    (t.id.clone(), t.worktree.clone().unwrap())
+}
+
+fn branch_exists(sb: &Sandbox, branch: &str) -> bool {
+    let out = std::process::Command::new("git")
+        .args(["branch", "--list", branch])
+        .current_dir(sb.repo())
+        .output()
+        .unwrap();
+    !out.stdout.is_empty()
+}
+
+#[test]
+fn removing_a_worktree_asks_then_moves_its_thread_to_the_project_folder() {
+    let sb = Sandbox::new("wt-remove");
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, Some(echo_agent(&sb)))]);
+    let (id, path) = worktree_thread(&sb, &mut rt);
+    rt.update(|s, _| crate::actions::go(s, Screen::Settings(Section::Worktrees)));
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, &format!("worktree-remove-{id}"));
+    assert_eq!(rt.state.confirm, Some(Pending::RemoveWorktree(id.clone())));
+    assert!(Path::new(&path).exists() && rt.state.ws.thread(&id).unwrap().worktree.is_some());
+    click(&mut rt, "confirm-ok");
+    pump(&mut rt, |s| {
+        s.ws.thread(&id).is_some_and(|t| t.worktree.is_none())
+    });
+    let t = rt.state.ws.thread(&id).unwrap();
+    assert!(t.branch.is_none());
+    assert!(!Path::new(&path).exists());
+    assert!(
+        branch_exists(&sb, &format!("oxlet/{id}")),
+        "the branch stays"
+    );
+}
+
+#[test]
+fn deleting_an_archived_thread_takes_its_worktree_and_automation_runs() {
+    let sb = Sandbox::new("delete");
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, Some(echo_agent(&sb)))]);
+    let (id, path) = worktree_thread(&sb, &mut rt);
+    rt.update(|s, tx| {
+        crate::sidebar::archive(s, &id, tx);
+        s.ws.automations.push(oxlet_core::model::Automation {
+            id: "a1".into(),
+            project: s.ws.projects[0].id.clone(),
+            name: "Nightly".into(),
+            prompt: "check".into(),
+            provider: ProviderId::Claude,
+            model: String::new(),
+            schedule: oxlet_core::model::Schedule::Hourly,
+            enabled: false,
+            last_run: None,
+            runs: vec![id.clone()],
+        });
+        crate::actions::go(s, Screen::Settings(Section::Archived));
+    });
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, &format!("delete-{id}"));
+    assert!(
+        rt.state.ws.thread(&id).is_some(),
+        "nothing goes before the confirmation"
+    );
+    click(&mut rt, "confirm-ok");
+    assert!(rt.state.ws.thread(&id).is_none());
+    assert!(rt.state.ws.automations[0].runs.is_empty());
+    pump(&mut rt, |_| !Path::new(&path).exists());
+}
+
+#[test]
+fn removing_a_project_stops_its_turns_and_leaves_its_folder() {
+    let sb = Sandbox::new("project-remove");
+    let pid_file = sb.root.join("agent.pid");
+    let claude = sb.agent(
+        "claude",
+        &format!("echo $$ > '{}'\nexec sleep 30", pid_file.display()),
+    );
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, Some(claude))]);
+    send(&mut rt, "long job");
+    pump(&mut rt, |_| {
+        std::fs::read_to_string(&pid_file).is_ok_and(|p| p.ends_with('\n'))
+    });
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let project = rt.state.ws.projects[0].id.clone();
+    let row = format!("project-{project}");
+
+    let (x, y) = rt.find(&row).unwrap();
+    rt.secondary_down(x, y);
+    rt.secondary_up(x, y);
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, "project-menu-item0");
+    type_text(&mut rt, "renamed");
+    press(&mut rt, rune::Key::Enter);
+    assert_eq!(rt.state.ws.projects[0].name, "renamed");
+
+    let (x, y) = rt.find(&row).unwrap();
+    rt.secondary_down(x, y);
+    rt.secondary_up(x, y);
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, "project-menu-item2");
+    assert_eq!(rt.state.confirm, Some(Pending::RemoveProject(project)));
+    click(&mut rt, "confirm-ok");
+    assert!(rt.state.ws.projects.is_empty() && rt.state.ws.threads.is_empty());
+    assert!(rt.state.turns.is_empty() && rt.state.selected.is_none());
+    assert!(Path::new(&sb.repo()).join("README.md").exists());
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    let start = Instant::now();
+    while alive() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!alive(), "the removed project's turn kept running");
+}
+
+#[test]
+fn an_edit_left_behind_in_another_thread_rewinds_nothing() {
+    let sb = Sandbox::new("edit-switch");
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, Some(echo_agent(&sb)))]);
+    send(&mut rt, "in a");
+    pump(&mut rt, idle);
+    let a = rt.state.selected.clone().unwrap();
+    rt.update(|s, _| crate::actions::new_thread(s));
+    send(&mut rt, "in b");
+    pump(&mut rt, idle);
+    let b = rt.state.selected.clone().unwrap();
+    let first = rt.state.ws.thread(&a).unwrap().messages[0].id.clone();
+    rt.update(|s, tx| {
+        crate::actions::select_thread(s, &a, tx);
+        crate::actions::edit_message(s, &a, &first);
+    });
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, &format!("thread-{b}"));
+    send(&mut rt, "more in b");
+    pump(&mut rt, |s| {
+        idle(s) && s.thread().is_some_and(|t| t.messages.len() == 4)
+    });
+    assert_eq!(rt.state.ws.thread(&a).unwrap().messages.len(), 2);
+    assert_eq!(rt.state.selected.as_deref(), Some(b.as_str()));
+}
+
+#[test]
+fn notes_belong_to_their_thread() {
+    let sb = Sandbox::new("notes");
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, None)]);
+    send(&mut rt, "a");
+    let a = rt.state.selected.clone().unwrap();
+    rt.update(|s, _| crate::actions::new_thread(s));
+    send(&mut rt, "b");
+    let b = rt.state.selected.clone().unwrap();
+    rt.update(|s, tx| {
+        crate::actions::select_thread(s, &a, tx);
+        s.dock_tab = crate::state::DockTab::Notes;
+        s.dock.set_open(true);
+    });
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, "notes-input");
+    type_text(&mut rt, "for a");
+    click(&mut rt, &format!("thread-{b}"));
+    click(&mut rt, "notes-input");
+    type_text(&mut rt, "for b");
+    assert_eq!(rt.state.ws.thread(&a).unwrap().notes, "for a");
+    assert_eq!(rt.state.ws.thread(&b).unwrap().notes, "for b");
+}
+
+#[test]
+fn choices_on_the_new_thread_screen_carry_into_its_thread() {
+    let sb = Sandbox::new("draft");
+    let codex = sb.agent("codex", r#"echo '{"type":"turn.completed"}'"#);
+    let mut rt = runtime(&sb, vec![(ProviderId::Codex, Some(codex))]);
+    rt.update(|s, _| {
+        s.ws.settings.default_provider = Some(ProviderId::Codex);
+        s.ws.settings.hidden_providers = vec![ProviderId::Claude];
+    });
+    rt.frame(1.0 / 60.0);
+    send(&mut rt, "/plan");
+    click(&mut rt, "model-trigger");
+    click(&mut rt, "option1");
+    click(&mut rt, "effort-trigger");
+    click(&mut rt, "option0");
+    assert!(rt.state.ws.threads.is_empty());
+    send(&mut rt, "do it");
+    pump(&mut rt, idle);
+    let t = thread(&rt);
+    assert_eq!(
+        (t.provider, t.model.as_str(), t.effort, t.mode),
+        (
+            ProviderId::Codex,
+            "gpt-6.1-sol",
+            oxlet_core::model::Effort::Low,
+            oxlet_core::model::ChatMode::Plan
+        )
+    );
+    let args = sb.args("codex");
+    assert!(args.contains("--sandbox\nread-only\n") && args.contains("-m\ngpt-6.1-sol\n"));
+}
+
+#[test]
+fn a_session_reported_after_clear_is_ignored() {
+    let sb = Sandbox::new("clear");
+    let claude = sb.agent(
+        "claude",
+        r#"sleep 0.5
+echo '{"type":"system","subtype":"init","session_id":"old"}'
+echo '{"type":"result","is_error":false,"session_id":"old"}'"#,
+    );
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, Some(claude))]);
+    send(&mut rt, "long");
+    send(&mut rt, "/clear");
+    pump(&mut rt, idle);
+    assert_eq!(thread(&rt).session, None);
+}
+
+#[test]
+fn compact_hands_only_the_summary_to_a_fresh_session() {
+    let sb = Sandbox::new("compact");
+    let claude = sb.agent(
+        "claude",
+        r#"for last; do :; done
+case "$last" in *Summarise*) reply="the summary";; *) reply="re: $(printf '%s' "$last" | tail -n 1)";; esac
+sleep 0.3
+printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' "$reply"
+echo '{"type":"result","is_error":false,"session_id":"s"}'"#,
+    );
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, Some(claude))]);
+    send(&mut rt, "first");
+    send(&mut rt, "/compact");
+    pump(&mut rt, |s| {
+        idle(s) && s.thread().is_some_and(|t| t.messages.len() == 5)
+    });
+    assert_eq!(thread(&rt).session, None);
+    send(&mut rt, "next");
+    pump(&mut rt, |s| {
+        idle(s) && s.thread().is_some_and(|t| t.messages.len() == 7)
+    });
+    let turns = turns(&sb, "claude");
+    assert!(
+        turns[1].contains("--resume\ns\n"),
+        "the compaction reads the old session"
+    );
+    assert!(!turns[2].contains("--resume"));
+    assert!(turns[2].contains("Assistant: the summary") && !turns[2].contains("User: first"));
+}
+
+#[test]
+fn stopping_a_turn_keeps_its_queue_in_order() {
+    let sb = Sandbox::new("stop-queue");
+    let claude = sb.agent(
+        "claude",
+        r#"for last; do :; done
+[ "$last" = first ] && exec sleep 30
+printf '{"type":"assistant","message":{"content":[{"type":"text","text":"re: %s"}]}}\n' "$last"
+echo '{"type":"result","is_error":false,"session_id":"q"}'"#,
+    );
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, Some(claude))]);
+    send(&mut rt, "first");
+    send(&mut rt, "second");
+    let id = rt.state.selected.clone().unwrap();
+    rt.update(|s, _| crate::actions::stop_turn(s, &id));
+    pump(&mut rt, |s| s.turns.is_empty());
+    assert_eq!(rt.state.queued[&id].len(), 1);
+    send(&mut rt, "third");
+    pump(&mut rt, |s| {
+        idle(s) && s.thread().is_some_and(|t| t.messages.len() == 6)
+    });
+    let asked: Vec<String> = thread(&rt)
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .map(|m| m.text())
+        .collect();
+    assert_eq!(asked, ["first", "second", "third"]);
+}
+
+#[test]
+fn a_stopped_command_does_not_end_the_next_one() {
+    let sb = Sandbox::new("terminal");
+    let mut rt = runtime(&sb, vec![]);
+    rt.update(|s, _| {
+        s.dock_tab = crate::state::DockTab::Terminal;
+        s.dock.set_open(true);
+    });
+    for command in ["sleep 5", "echo second; sleep 5"] {
+        rt.update(|s, tx| {
+            s.terminal.input = TextEdit::new(command);
+            crate::actions::run_terminal(s, tx);
+        });
+    }
+    pump(&mut rt, |s| {
+        s.terminal.lines.iter().any(|(_, l)| l == "second")
+    });
+    let start = Instant::now();
+    pump(&mut rt, |_| start.elapsed() > Duration::from_millis(500));
+    assert!(rt.state.terminal.running.is_some());
+    assert!(
+        !rt.state
+            .terminal
+            .lines
+            .iter()
+            .any(|(_, l)| l.starts_with("exit"))
+    );
+    click(&mut rt, "terminal-input");
+    let mut seen = Vec::new();
+    for key in [
+        rune::Key::Up,
+        rune::Key::Up,
+        rune::Key::Down,
+        rune::Key::Down,
+    ] {
+        press(&mut rt, key);
+        seen.push(rt.state.terminal.input.text.clone());
+    }
+    assert_eq!(
+        seen,
+        [
+            "echo second; sleep 5",
+            "sleep 5",
+            "echo second; sleep 5",
+            ""
+        ]
+    );
+    if let Some(r) = &rt.state.terminal.running {
+        r.stop();
+    }
+}
+
+#[test]
+fn a_failed_commit_keeps_its_message() {
+    let sb = Sandbox::new("commit");
+    let repo = PathBuf::from(sb.repo());
+    let hook = repo.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
+    std::process::Command::new("chmod")
+        .args(["+x", hook.to_str().unwrap()])
+        .status()
+        .unwrap();
+    std::fs::write(repo.join("README.md"), "changed\n").unwrap();
+    let mut rt = runtime(&sb, vec![]);
+    rt.update(|s, _| {
+        s.dock.set_open(true);
+        crate::actions::refresh_repo(s);
+    });
+    pump(&mut rt, |s| s.repo.changes.len() == 1);
+    rt.update(|s, _| s.commit_message = TextEdit::new("Change the readme"));
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, "commit");
+    pump(&mut rt, |s| {
+        s.toast
+            .as_ref()
+            .is_some_and(|t| t.text.contains("lint failed"))
+    });
+    assert_eq!(rt.state.commit_message.text, "Change the readme");
+    std::fs::remove_file(&hook).unwrap();
+    click(&mut rt, "commit");
+    pump(&mut rt, |s| s.commit_message.text.is_empty());
+}
+
+#[test]
+fn a_long_newest_reply_still_reaches_the_next_agent() {
+    let mut w = Workspace::default();
+    let p = w.add_project("/x");
+    let t = w.create_thread(&p, ProviderId::Claude, "", 1);
+    let long = "é".repeat(10_000);
+    w.push_message(&t, Role::User, vec![Part::Text { text: "q".into() }], 2);
+    w.push_message(&t, Role::Assistant, vec![Part::Text { text: long }], 3);
+    let context = crate::actions::handoff(&w.thread(&t).unwrap().messages).unwrap();
+    assert!(context.contains("Assistant: éé") && context.len() < 12_200);
+}
+
+#[test]
+fn automations_wait_for_provider_detection() {
+    let sb = Sandbox::new("automation");
+    let mut rt = runtime(&sb, vec![]);
+    rt.update(|s, _| {
+        s.demo = false;
+        s.ws.settings.notify_on_finish = false;
+        s.providers.clear();
+        s.ws.automations.push(oxlet_core::model::Automation {
+            id: "a1".into(),
+            project: s.ws.projects[0].id.clone(),
+            name: "Check".into(),
+            prompt: "check".into(),
+            provider: ProviderId::Claude,
+            model: String::new(),
+            schedule: oxlet_core::model::Schedule::EveryMinutes { minutes: 15 },
+            enabled: true,
+            last_run: None,
+            runs: Vec::new(),
+        });
+    });
+    rt.update(|s, tx| {
+        crate::poll(s, 1.0, tx);
+    });
+    assert!(rt.state.ws.threads.is_empty());
+    let claude = echo_agent(&sb);
+    rt.update(|s, tx| {
+        s.providers
+            .insert(Target::Local, vec![(ProviderId::Claude, Some(claude))]);
+        crate::poll(s, 2.0, tx);
+    });
+    assert_eq!(rt.state.ws.threads.len(), 1);
+    assert_eq!(rt.state.ws.automations[0].runs.len(), 1);
+    rt.update(|s, _| s.selected = s.ws.automations[0].runs.first().cloned());
+    pump(&mut rt, idle);
+}
+
+#[test]
+fn escape_closes_the_slash_menu_for_good() {
+    let sb = Sandbox::new("slash-escape");
+    let mut rt = runtime(&sb, vec![]);
+    rt.update(|s, tx| {
+        s.composer = TextEdit::new("/cl");
+        tx.focus("composer-field", false);
+    });
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("slash-content").is_some());
+    press(&mut rt, rune::Key::Escape);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("slash-content").is_none());
+}
+
+#[test]
+fn quitting_stops_turns_and_saves() {
+    let sb = Sandbox::new("quit");
+    let pid_file = sb.root.join("agent.pid");
+    let claude = sb.agent(
+        "claude",
+        &format!("echo $$ > '{}'\nexec sleep 30", pid_file.display()),
+    );
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, Some(claude))]);
+    rt.update(|s, _| s.demo = false);
+    send(&mut rt, "long job");
+    pump(&mut rt, |_| {
+        std::fs::read_to_string(&pid_file).is_ok_and(|p| p.ends_with('\n'))
+    });
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_owned();
+    rt.update(crate::quit);
+    let saved = oxlet_core::store::load(&sb.root.join("home"));
+    assert_eq!(saved.threads[0].messages[0].text(), "long job");
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    let start = Instant::now();
+    while alive() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!alive(), "the turn outlived the app");
+}
+
+#[test]
+fn the_palette_hands_goal_to_the_composer_on_the_thread() {
+    let sb = Sandbox::new("palette-goal");
+    let mut rt = runtime(&sb, vec![(ProviderId::Claude, None)]);
+    send(&mut rt, "start");
+    rt.update(|s, tx| {
+        crate::actions::go(s, Screen::Kanban);
+        crate::palette::open(s);
+        if let Some(p) = s.palette.as_mut() {
+            p.query = TextEdit::new("Goal");
+        }
+        tx.focus("palette-field", false);
+    });
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, rune::Key::Enter);
+    assert_eq!(rt.state.screen, Screen::Thread);
+    assert_eq!(rt.state.composer.text, "/goal ");
+}
+
+#[test]
+fn colours_apply_once_whole_and_unapplied_drafts_go_on_blur() {
+    let sb = Sandbox::new("hex");
+    let mut rt = runtime(&sb, vec![]);
+    rt.update(|s, _| crate::actions::go(s, Screen::Settings(Section::Appearance)));
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, "hex-light-background");
+    press(&mut rt, rune::Key::Command('a'));
+    type_text(&mut rt, "#F6F");
+    assert_eq!(rt.state.ws.settings.light.background, "#F6F6F3");
+    type_text(&mut rt, "6F4");
+    assert_eq!(rt.state.ws.settings.light.background, "#F6F6F4");
+    type_text(&mut rt, "#12");
+    click(&mut rt, "settings-back");
+    rt.update(|s, _| crate::actions::go(s, Screen::Settings(Section::Appearance)));
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, "hex-light-background");
+    assert_eq!(rt.state.hex_fields["light-background"].text, "#F6F6F4");
+}
+
+#[test]
+fn pull_requests_match_live_threads_of_this_project_only() {
+    let sb = Sandbox::new("prs");
+    let mut rt = runtime(&sb, vec![]);
+    rt.update(|s, _| {
+        let here = s.ws.projects[0].id.clone();
+        let there = s.ws.add_project("/elsewhere");
+        for (project, archived) in [(here, true), (there, false)] {
+            let id = s.ws.create_thread(&project, ProviderId::Claude, "", 1);
+            let t = s.ws.thread_mut(&id).unwrap();
+            (t.branch, t.archived) = (Some("feature".into()), archived);
+        }
+        s.screen = Screen::PullRequests;
+        s.prs = Some(Ok(vec![oxlet_core::git::PullRequest {
+            number: 5,
+            title: "Feature".into(),
+            branch: "feature".into(),
+            state: "OPEN".into(),
+            author: None,
+            draft: false,
+            url: String::new(),
+        }]));
+    });
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("pr-5").is_some() && rt.find("pr-thread-5").is_none());
+    rt.update(|s, _| s.ws.threads[0].archived = false);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("pr-thread-5").is_some());
+}
+
+#[test]
+fn two_projects_with_one_name_can_each_be_picked() {
+    let sb = Sandbox::new("same-name");
+    let mut rt = runtime(&sb, vec![]);
+    let other = rt.state.ws.projects[0].path.replace("/repo", "/other/repo");
+    rt.update(|s, _| {
+        s.ws.add_project(&other);
+        crate::actions::go(s, Screen::Automations);
+    });
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, "auto-project-trigger");
+    click(&mut rt, "option1");
+    assert_eq!(
+        rt.state.auto_project.as_ref(),
+        Some(&rt.state.ws.projects[1].id)
+    );
 }

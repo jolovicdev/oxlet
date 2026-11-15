@@ -24,14 +24,15 @@ pub fn is_dark(settings: &Settings, system_dark: bool) -> bool {
 }
 
 fn color(hex: &str, fallback: &str) -> Color {
-    rune::color::hex(hex.trim())
-        .or_else(|| rune::color::hex(fallback))
+    parse_hex(hex)
+        .or_else(|| parse_hex(fallback))
         .unwrap_or(Color::WHITE)
 }
 
+/// `#rgb` or `#rrggbb`. Rune slices the digits by byte, so anything but ASCII is refused first.
 pub fn parse_hex(hex: &str) -> Option<Color> {
     let h = hex.trim();
-    (h.len() == 7 || h.len() == 4)
+    (h.is_ascii() && (h.len() == 7 || h.len() == 4))
         .then(|| rune::color::hex(h))
         .flatten()
 }
@@ -179,5 +180,17 @@ pub fn sized(style: TextStyle, size: f32) -> TextStyle {
         size: size * scale,
         line_height: style.line_height / style.size.max(1.0) * size * scale,
         ..style
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_fields_refuse_text_that_is_not_ascii() {
+        assert_eq!(parse_hex("#€"), None);
+        assert_eq!(parse_hex("#é1"), None);
+        assert!(parse_hex("#F6F").is_some() && parse_hex(" #16788C ").is_some());
     }
 }

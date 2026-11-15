@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::model::Workspace;
+use crate::model::{ThreadStatus, Workspace};
 
 /// Oxlet's data folder: `$OXLET_HOME`, else `~/.oxlet`.
 pub fn home() -> PathBuf {
@@ -33,13 +33,23 @@ pub fn state_file(dir: &Path) -> PathBuf {
 }
 
 /// Reads the workspace. A missing file is an empty workspace; an unreadable one is kept aside.
+/// No turn outlives the app, so a thread saved mid-turn loads idle.
 pub fn load(dir: &Path) -> Workspace {
     let file = state_file(dir);
     let Ok(text) = std::fs::read_to_string(&file) else {
         return Workspace::default();
     };
-    match serde_json::from_str(&text) {
-        Ok(w) => w,
+    match serde_json::from_str::<Workspace>(&text) {
+        Ok(mut w) => {
+            for t in w
+                .threads
+                .iter_mut()
+                .filter(|t| t.status == ThreadStatus::Working)
+            {
+                t.status = ThreadStatus::Idle;
+            }
+            w
+        }
         Err(_) => {
             let _ = std::fs::rename(&file, dir.join("workspace.corrupt.json"));
             Workspace::default()
@@ -73,6 +83,18 @@ mod tests {
         std::fs::write(state_file(&dir), "{oops").unwrap();
         assert_eq!(load(&dir), Workspace::default());
         assert!(dir.join("workspace.corrupt.json").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_thread_saved_mid_turn_loads_idle() {
+        let dir = std::env::temp_dir().join(format!("oxlet-store-working-{}", std::process::id()));
+        let mut w = Workspace::default();
+        let p = w.add_project("/tmp/x");
+        let t = w.create_thread(&p, ProviderId::Claude, "", 1);
+        w.thread_mut(&t).unwrap().status = ThreadStatus::Working;
+        save(&dir, &w).unwrap();
+        assert_eq!(load(&dir).thread(&t).unwrap().status, ThreadStatus::Idle);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

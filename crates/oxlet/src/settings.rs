@@ -1,7 +1,10 @@
 use oxlet_core::model::{AccessMode, Density, Palette, ThemeMode};
 use oxlet_core::provider::{PROVIDERS, ProviderId};
 use oxlet_core::target::Target;
-use oxlet_core::{git, store};
+use std::collections::HashMap;
+use std::hash::Hash;
+
+use oxlet_core::store;
 use rune::{Color, El, ScrollSpec, TextEdit, Tx, col, icon, row, text};
 use rune_kit::shell::SidebarRow;
 use rune_kit::{
@@ -11,7 +14,7 @@ use rune_kit::{
 use rune_theme_opencode::icons;
 
 use crate::actions::{self, mark_dirty, notice};
-use crate::state::{App, Event, Popup, Screen, Section};
+use crate::state::{App, Pending, Placement, Popup, Screen, Section};
 use crate::theme;
 
 const GROUPS: [(&str, &[Section]); 4] = [
@@ -34,7 +37,7 @@ pub fn view(s: &App, section: Section, k: &Kit, inset: f32, layer: &mut Vec<El>)
         SidebarRow::new("Back to app")
             .icon(&icons::ARROW_LEFT)
             .height(32.0)
-            .on_select(|s: &mut App, _| s.screen = Screen::Thread)
+            .on_select(|s: &mut App, _| actions::go(s, Screen::Thread))
             .build(k)
             .key("settings-back"),
     );
@@ -53,7 +56,7 @@ pub fn view(s: &App, section: Section, k: &Kit, inset: f32, layer: &mut Vec<El>)
                     .icon(section_icon(sec))
                     .height(32.0)
                     .selected(sec == section)
-                    .on_select(move |s: &mut App, _| s.screen = Screen::Settings(sec))
+                    .on_select(move |s: &mut App, _| actions::go(s, Screen::Settings(sec)))
                     .build(k)
                     .key(format!("settings-{}", sec.title())),
             );
@@ -159,19 +162,26 @@ fn setting(k: &Kit, title: &str, detail: Option<&str>, control: El) -> El {
         .child(control)
 }
 
+/// The default-provider choice that leaves it to whichever CLI is installed.
+const FIRST_INSTALLED: &str = "First installed";
+
 fn general(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let st = &s.ws.settings;
-    let names: Vec<&str> = PROVIDERS.iter().map(|p| p.name).collect();
+    let names: Vec<&str> = std::iter::once(FIRST_INSTALLED)
+        .chain(PROVIDERS.iter().map(|p| p.name))
+        .collect();
     let provider = Select::new("default-provider", &names)
         .label("Default provider")
-        .placeholder("Choose")
-        .current(st.default_provider.map(|p| p.info().name))
-        .open(s.popup == Some(Popup::Model))
+        .current(Some(
+            st.default_provider
+                .map_or(FIRST_INSTALLED, |p| p.info().name),
+        ))
+        .open(s.popup == Some(Popup::DefaultProvider))
         .on_toggle(|s: &mut App| {
-            s.popup = if s.popup == Some(Popup::Model) {
+            s.popup = if s.popup == Some(Popup::DefaultProvider) {
                 None
             } else {
-                Some(Popup::Model)
+                Some(Popup::DefaultProvider)
             }
         })
         .on_close(|s: &mut App| s.popup = None)
@@ -185,12 +195,12 @@ fn general(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let access = Select::new("default-access", &access_labels)
         .label("Default access")
         .current(Some(st.default_access.label()))
-        .open(s.popup == Some(Popup::Access))
+        .open(s.popup == Some(Popup::DefaultAccess))
         .on_toggle(|s: &mut App| {
-            s.popup = if s.popup == Some(Popup::Access) {
+            s.popup = if s.popup == Some(Popup::DefaultAccess) {
                 None
             } else {
-                Some(Popup::Access)
+                Some(Popup::DefaultAccess)
             }
         })
         .on_close(|s: &mut App| s.popup = None)
@@ -226,8 +236,13 @@ fn general(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                     Some("Each new thread works in its own managed worktree and branch."),
                     Switch::new(st.worktrees_by_default)
                         .on_toggle(|s: &mut App| {
-                            s.ws.settings.worktrees_by_default =
-                                !s.ws.settings.worktrees_by_default;
+                            let on = !s.ws.settings.worktrees_by_default;
+                            s.ws.settings.worktrees_by_default = on;
+                            s.placement = if on {
+                                Placement::Worktree
+                            } else {
+                                Placement::Local
+                            };
                             s.dirty = true;
                         })
                         .build(k)
@@ -256,17 +271,7 @@ fn appearance(s: &App, k: &Kit) -> El {
         .icon(&icons::RESET)
         .variant(ButtonVariant::Ghost)
         .control_size(ControlSize::Small)
-        .on_press_tx(|s: &mut App, tx| {
-            s.ws.settings.dark = Palette::default_dark();
-            s.ws.settings.light = Palette::default_light();
-            s.ws.settings.theme = ThemeMode::System;
-            s.ws.settings.density = Density::Comfortable;
-            s.ws.settings.ui_font.clear();
-            s.ws.settings.code_font.clear();
-            s.ws.settings.text_scale = 1.0;
-            s.hex_fields.clear();
-            mark_dirty(s, tx);
-        })
+        .on_press(|s: &mut App| s.confirm = Some(Pending::RestoreAppearance))
         .build(k)
         .key("appearance-restore");
     let mut cards = row().w_full().gap(12.0);
@@ -347,6 +352,42 @@ fn appearance(s: &App, k: &Kit) -> El {
                 setting(k, "24-hour time", None, clock),
             ],
         ))
+}
+
+pub fn restore_appearance(s: &mut App) {
+    let st = &mut s.ws.settings;
+    st.dark = Palette::default_dark();
+    st.light = Palette::default_light();
+    st.theme = ThemeMode::System;
+    st.density = Density::Comfortable;
+    st.ui_font.clear();
+    st.code_font.clear();
+    st.text_scale = 1.0;
+    st.clock_24h = true;
+    s.hex_fields.clear();
+}
+
+/// The editor a settings field types into, holding `saved` whenever the field is not focused:
+/// text typed but never applied goes when the field loses focus.
+fn draft<'a, K: Eq + Hash>(
+    drafts: &'a mut HashMap<K, TextEdit>,
+    key: K,
+    saved: &str,
+) -> &'a mut TextEdit {
+    let edit = drafts.entry(key).or_insert_with(|| TextEdit::new(saved));
+    if !edit.focused {
+        *edit = TextEdit::new(saved);
+    }
+    edit
+}
+
+/// What a draft field shows: its draft while focused, else the saved value.
+fn field_edit<K: Eq + Hash>(drafts: &HashMap<K, TextEdit>, key: &K, saved: &str) -> TextEdit {
+    drafts
+        .get(key)
+        .filter(|e| e.focused)
+        .cloned()
+        .unwrap_or_else(|| TextEdit::new(saved))
 }
 
 fn presets(s: &App, k: &Kit) -> El {
@@ -473,6 +514,7 @@ fn font_field(s: &App, k: &Kit, code: bool) -> El {
             .role("radio")
             .label(label)
             .checked(on)
+            .focusable(true)
             .on_press_tx(move |s: &mut App, tx| {
                 set_font(s, code, value);
                 s.hex_fields.remove(key);
@@ -486,15 +528,16 @@ fn font_field(s: &App, k: &Kit, code: bool) -> El {
     };
     let custom =
         !current.is_empty() && current != "system" && !(!code && current == "Cascadia Code");
-    let edit = s
-        .hex_fields
-        .get(key)
-        .cloned()
-        .unwrap_or_else(|| TextEdit::new(if custom { current } else { "" }));
+    let saved = if custom {
+        current.to_owned()
+    } else {
+        String::new()
+    };
+    let edit = field_edit(&s.hex_fields, &key, &saved);
     let field = TextInput::new(&edit)
         .width(Some(132.0))
         .placeholder("Font name")
-        .on_edit(move |s: &mut App| s.hex_fields.entry(key).or_insert_with(|| TextEdit::new("")))
+        .on_edit(move |s: &mut App| draft(&mut s.hex_fields, key, &saved))
         .on_submit(move |s: &mut App, tx| {
             let name = s
                 .hex_fields
@@ -640,11 +683,8 @@ fn palette_group(s: &App, k: &Kit, dark: bool) -> El {
 }
 
 fn hex_field(s: &App, key: &'static str, value: &str, k: &Kit) -> El {
-    let edit = s
-        .hex_fields
-        .get(key)
-        .cloned()
-        .unwrap_or_else(|| TextEdit::new(value.to_owned()));
+    let edit = field_edit(&s.hex_fields, &key, value);
+    let saved = value.to_owned();
     let swatch = theme::parse_hex(&edit.text)
         .or_else(|| theme::parse_hex(value))
         .unwrap_or(Color::WHITE);
@@ -663,21 +703,22 @@ fn hex_field(s: &App, key: &'static str, value: &str, k: &Kit) -> El {
             TextInput::new(&edit)
                 .width(None)
                 .text_style(theme::sized(k.ty.mono, 12.0))
-                .on_edit(move |s: &mut App| {
-                    s.hex_fields.entry(key).or_insert_with(|| TextEdit::new(""))
-                })
-                .on_change(move |s: &mut App, tx| apply_hex(s, key, tx))
+                .on_edit(move |s: &mut App| draft(&mut s.hex_fields, key, &saved))
+                .on_change(move |s: &mut App, tx| apply_hex(s, key, false, tx))
+                .on_submit(move |s: &mut App, tx| apply_hex(s, key, true, tx))
                 .build(k)
                 .grow(1.0)
                 .key(format!("hex-{key}")),
         )
 }
 
-fn apply_hex(s: &mut App, key: &'static str, tx: &mut Tx) {
+/// Applies a typed colour. While typing only a whole `#RRGGBB` counts: `#F6F` on the way to
+/// `#F6F6F3` is a colour of its own.
+fn apply_hex(s: &mut App, key: &'static str, submitted: bool, tx: &mut Tx) {
     let Some(text) = s.hex_fields.get(key).map(|e| e.text.trim().to_uppercase()) else {
         return;
     };
-    if theme::parse_hex(&text).is_none() {
+    if theme::parse_hex(&text).is_none() || !(submitted || text.len() == 7) {
         return;
     }
     let st = &mut s.ws.settings;
@@ -710,25 +751,19 @@ fn providers(s: &App, k: &Kit) -> El {
                 .font(k.ty.small)
                 .color(c.warning.icon),
         };
-        let edit = s.provider_path.get(&id).cloned().unwrap_or_else(|| {
-            TextEdit::new(
-                s.ws.settings
-                    .provider_paths
-                    .iter()
-                    .find(|(x, _)| *x == id)
-                    .map(|(_, v)| v.clone())
-                    .unwrap_or_default(),
-            )
-        });
+        let saved =
+            s.ws.settings
+                .provider_paths
+                .iter()
+                .find(|(x, _)| *x == id)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+        let edit = field_edit(&s.provider_path, &id, &saved);
         let path = TextInput::new(&edit)
             .width(None)
             .placeholder(format!("Custom path to {}", p.binary))
             .text_style(theme::sized(k.ty.mono, 12.0))
-            .on_edit(move |s: &mut App| {
-                s.provider_path
-                    .entry(id)
-                    .or_insert_with(|| TextEdit::new(""))
-            })
+            .on_edit(move |s: &mut App| draft(&mut s.provider_path, id, &saved))
             .on_submit(move |s: &mut App, tx| {
                 let v = s
                     .provider_path
@@ -825,20 +860,13 @@ fn more_models(s: &App, k: &Kit, id: ProviderId) -> El {
             .filter(|(p, _)| *p == id)
             .map(|(_, m)| m.as_str())
             .collect();
-    let edit = s
-        .model_fields
-        .get(&id)
-        .cloned()
-        .unwrap_or_else(|| TextEdit::new(saved.join(", ")));
+    let saved = saved.join(", ");
+    let edit = field_edit(&s.model_fields, &id, &saved);
     TextInput::new(&edit)
         .width(None)
         .placeholder("More models, comma-separated")
         .text_style(theme::sized(k.ty.mono, 12.0))
-        .on_edit(move |s: &mut App| {
-            s.model_fields
-                .entry(id)
-                .or_insert_with(|| TextEdit::new(""))
-        })
+        .on_edit(move |s: &mut App| draft(&mut s.model_fields, id, &saved))
         .on_submit(move |s: &mut App, tx| {
             let text = s
                 .model_fields
@@ -861,19 +889,12 @@ fn more_models(s: &App, k: &Kit, id: ProviderId) -> El {
 
 fn worktrees(s: &App, k: &Kit) -> El {
     let c = &k.c;
-    let root = s
-        .hex_fields
-        .get("worktree-root")
-        .cloned()
-        .unwrap_or_else(|| TextEdit::new(s.ws.settings.worktree_root.clone()));
+    let saved = s.ws.settings.worktree_root.clone();
+    let root = field_edit(&s.hex_fields, &"worktree-root", &saved);
     let root_field = TextInput::new(&root)
         .width(None)
         .text_style(theme::sized(k.ty.mono, 12.0))
-        .on_edit(|s: &mut App| {
-            s.hex_fields
-                .entry("worktree-root")
-                .or_insert_with(|| TextEdit::new(""))
-        })
+        .on_edit(move |s: &mut App| draft(&mut s.hex_fields, "worktree-root", &saved))
         .on_submit(|s: &mut App, tx| {
             if let Some(v) = s
                 .hex_fields
@@ -891,12 +912,7 @@ fn worktrees(s: &App, k: &Kit) -> El {
     let mut list = Vec::new();
     for t in s.ws.threads.iter().filter(|t| t.worktree.is_some()) {
         let path = t.worktree.clone().unwrap_or_default();
-        let (id, repo) = (
-            t.id.clone(),
-            s.ws.project(&t.project)
-                .map(|p| p.at(&p.path))
-                .unwrap_or_default(),
-        );
+        let id = t.id.clone();
         list.push(
             row()
                 .w_full()
@@ -930,19 +946,8 @@ fn worktrees(s: &App, k: &Kit) -> El {
                     Button::new("Remove")
                         .variant(ButtonVariant::Ghost)
                         .control_size(ControlSize::Small)
-                        .on_press_tx(move |s: &mut App, tx| {
-                            if let Some(t) = s.ws.thread_mut(&id) {
-                                t.worktree = None;
-                            }
-                            let (repo, path) = (repo.clone(), path.clone());
-                            s.bridge.spawn(move |b| {
-                                let text = match git::worktree_remove(&repo, &path) {
-                                    Ok(()) => format!("Removed {path}"),
-                                    Err(e) => format!("Could not remove worktree: {e}"),
-                                };
-                                b.send(Event::Notice(text));
-                            });
-                            mark_dirty(s, tx);
+                        .on_press(move |s: &mut App| {
+                            s.confirm = Some(Pending::RemoveWorktree(id.clone()))
                         })
                         .build(k)
                         .key(format!("worktree-remove-{}", t.id)),
@@ -1004,7 +1009,8 @@ fn keybindings(k: &Kit) -> El {
                 "Ctrl+Shift+B".into()
             },
         ),
-        ("Toggle review panel", format!("{m}J")),
+        ("Toggle review panel in a thread", format!("{m}J")),
+        ("Open the terminal", format!("{m}`")),
         ("Stop the running turn", "Esc".into()),
         ("Send message", "Return".into()),
         ("New line", "Shift+Return".into()),
@@ -1016,11 +1022,7 @@ fn keybindings(k: &Kit) -> El {
         .collect();
     col()
         .gap(18.0)
-        .child(heading(
-            "Keybindings",
-            "Shortcuts available everywhere in Oxlet.",
-            k,
-        ))
+        .child(heading("Keybindings", "Keyboard shortcuts in Oxlet.", k))
         .child(group(k, rows))
 }
 
@@ -1062,9 +1064,8 @@ fn archived(s: &App, k: &Kit) -> El {
                         .variant(IconButtonVariant::GhostMuted)
                         .control_size(ControlSize::Small)
                         .label("Delete permanently")
-                        .on_press_tx(move |s: &mut App, tx| {
-                            s.ws.threads.retain(|t| t.id != b);
-                            mark_dirty(s, tx);
+                        .on_press(move |s: &mut App| {
+                            s.confirm = Some(Pending::DeleteThread(b.clone()))
                         })
                         .build(k)
                         .key(format!("delete-{}", t.id)),
