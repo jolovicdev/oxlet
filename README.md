@@ -10,7 +10,7 @@ Oxlet is written in Rust on [Rune](https://github.com/anomalyco/rune), a GPU-ren
 
 - **A start, not a blank page.** New threads open with starter prompts for mapping a codebase, finding a bug, writing tests or reviewing changes.
 - **Command palette.** ⌘K finds any thread or project and runs any action: new threads, screens, panels, appearance and slash commands.
-- **Projects and threads.** Add a project folder and start threads in it. Threads are grouped as Pinned, Recent, Yesterday and Earlier, searchable with ⌘K, and can be pinned, renamed, forked, marked done or archived from their context menu.
+- **Projects and threads.** Add a project folder from the folder dialog, a typed path, a WSL distro or an SSH host, and start threads in it. Threads are grouped as Pinned, Recent, Yesterday and Earlier, searchable with ⌘K, and can be pinned, renamed, forked, marked done or archived from their context menu.
 - **Agents you already have.** Claude Code, Codex, Cursor's agent, OpenCode, Gemini CLI and Factory Droid, detected on your `PATH` or at a path you set. Choose the provider, model and reasoning effort per thread. Codex offers GPT-6.1 Sol, GPT-6.1 Terra, GPT-6 Astra and GPT-6 Luna; Claude Code offers Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.2. Any other model id a CLI accepts can be added in Settings.
 - **Live transcripts.** Claude replies stream in word by word. Tool steps fold into a compact list and edited files show as a card with line counts. Each reply names the agent and model that wrote it and has copy, fork-from-here and pin actions.
 - **Cost and tokens.** Each reply shows the tokens it used, and the cost when the CLI reports one; Notes totals the thread.
@@ -53,6 +53,16 @@ The macOS app is signed ad hoc, not notarised. The first time, right-click Oxlet
 - The [GitHub CLI](https://cli.github.com) (`gh`), signed in, for the pull request list and *Create pull request*.
 
 If a CLI lives somewhere unusual, set its path in **Settings → Agent providers**.
+
+### WSL and SSH projects
+
+A project can live in a WSL distro or on an SSH host. Its agent turns, git and `gh` calls, terminal commands and worktrees run there. Add one from the menu beside **Add project**, or type `\\wsl.localhost\<distro>\path`, `user@host:/path` or `ssh://user@host[:port]/path`.
+
+- **WSL** needs Oxlet running on Windows, with `wsl.exe`.
+- **SSH** uses the system `ssh` client with key-based sign-in only (`BatchMode`), so the key must work without a password prompt. Set `OXLET_SSH` to use another client.
+- On either target, the agent CLI must be installed and signed in there, and on the PATH of the login shell (`~/.profile`). Commands run under that login shell; a PATH set only in `~/.bashrc`, as nvm does, is not read.
+- Worktrees go to `~/.oxlet/worktrees` on the target. Settings → Agent providers and custom CLI paths cover this machine only.
+- *Open in* offers VS Code, Cursor and Windsurf through their remote extensions. *Reveal* works for WSL, not SSH. Dropping files on the composer works for local projects only.
 
 ## Keyboard
 

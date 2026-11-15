@@ -5,11 +5,12 @@ use oxlet_core::model::{ChatMode, FileChange, Part, Role, ThreadStatus};
 use oxlet_core::process::{self, Line};
 use oxlet_core::provider::{AgentEvent, PROVIDERS, ProviderId, TurnRequest};
 use oxlet_core::slash::{self, Command};
+use oxlet_core::target::{self, Place, Target};
 use oxlet_core::{export, git, schedule, store, time};
-use rune::{TextEdit, Tx};
+use rune::{FileDialogOptions, TextEdit, Tx};
 use rune_kit::diff::{self, DiffState, FileDiff};
 
-use crate::state::{App, Event, Placement, RepoSnapshot, Screen, Toast, Turn, file_tree};
+use crate::state::{AddMode, App, Event, Placement, RepoSnapshot, Screen, Toast, Turn, file_tree};
 
 const SAVE_DELAY: f64 = 0.4;
 const MAX_TERMINAL_LINES: usize = 4000;
@@ -51,8 +52,32 @@ pub fn detect_providers(s: &App) {
                 )
             })
             .collect();
-        b.send(Event::Providers(found));
+        b.send(Event::Providers(Target::Local, found));
         b.send(Event::Editors(oxlet_core::open::editors(None)));
+        b.send(Event::Distros(target::wsl_distros()));
+    });
+}
+
+/// Looks for the agent CLIs on a WSL or SSH target the first time it is used.
+fn ensure_providers(s: &mut App, on: &Target) {
+    if *on == Target::Local || s.providers.contains_key(on) {
+        return;
+    }
+    s.providers.insert(on.clone(), Vec::new());
+    let on = on.clone();
+    s.bridge.spawn(move |b| {
+        let binaries: Vec<&str> = PROVIDERS.iter().map(|p| p.binary).collect();
+        match target::find_programs(&on, &binaries) {
+            Ok(found) => {
+                let found = PROVIDERS
+                    .iter()
+                    .zip(found)
+                    .map(|(p, path)| (p.id, path.map(PathBuf::from)))
+                    .collect();
+                b.send(Event::Providers(on, found));
+            }
+            Err(e) => b.send(Event::Notice(e)),
+        }
     });
 }
 
@@ -84,18 +109,98 @@ pub fn new_thread(s: &mut App) {
     refresh_repo(s);
 }
 
-pub fn add_project(s: &mut App, path: &str, tx: &mut Tx) {
-    let path = store::expand_home(path.trim());
+/// Asks for a folder to add as a project, starting in `start`.
+pub fn pick_folder(s: &mut App, start: Option<PathBuf>, tx: &mut Tx) {
+    s.popup = None;
+    let options = FileDialogOptions {
+        title: "Add project".into(),
+        directory: start,
+        ..Default::default()
+    };
+    tx.open_folder(options, |s: &mut App, result, tx| match result {
+        Ok(Some(path)) => add_project(s, &path.to_string_lossy(), tx),
+        Ok(None) => {}
+        // WSLg usually has no desktop portal for a Linux dialog; Windows has its own.
+        Err(_) if target::inside_wsl() => s
+            .bridge
+            .spawn(|b| b.send(Event::PickedFolder(target::windows_folder_dialog()))),
+        Err(e) => type_folder(s, &e.to_string(), tx),
+    });
+}
+
+pub fn picked_folder(s: &mut App, result: Result<Option<String>, String>, tx: &mut Tx) {
+    match result {
+        Ok(Some(path)) => add_project(s, &path, tx),
+        Ok(None) => {}
+        Err(e) => type_folder(s, &e, tx),
+    }
+}
+
+fn type_folder(s: &mut App, why: &str, tx: &mut Tx) {
+    start_adding(s, AddMode::Path);
+    notice(
+        s,
+        tx,
+        format!("No folder dialog is available ({why}). Type the folder's path instead."),
+    );
+}
+
+/// Opens the add-project field, for a path or an SSH location.
+pub fn start_adding(s: &mut App, mode: AddMode) {
+    s.popup = None;
+    s.adding_project = Some(mode);
+    s.add_project = TextEdit::new("");
+    s.add_project.focused = true;
+    if mode == AddMode::Ssh {
+        s.bridge
+            .spawn(|b| b.send(Event::SshHosts(target::ssh_hosts())));
+    }
+}
+
+/// Adds a typed or picked folder. A WSL or SSH folder is checked on its target first.
+pub fn add_project(s: &mut App, input: &str, tx: &mut Tx) {
+    let (on, path) = target::parse_location(input);
     if path.is_empty() {
         return;
     }
+    if on != Target::Local {
+        notice(
+            s,
+            tx,
+            format!("Opening {path} on {}", on.label().unwrap_or_default()),
+        );
+        let at = Place::new(on, path);
+        s.bridge.spawn(move |b| {
+            let result = target::resolve_folder(&at);
+            b.send(Event::FolderChecked {
+                target: at.target,
+                result,
+            });
+        });
+        return;
+    }
+    let path = store::expand_home(&path);
     if !Path::new(&path).is_dir() {
         notice(s, tx, format!("{path} is not a folder"));
         return;
     }
-    let id = s.ws.add_project(&path);
+    added(s, Target::Local, &path, tx);
+}
+
+pub fn folder_checked(s: &mut App, on: Target, result: Result<String, String>, tx: &mut Tx) {
+    match result {
+        Ok(path) => {
+            s.toast = None;
+            added(s, on, &path, tx);
+        }
+        Err(e) => notice(s, tx, e),
+    }
+}
+
+fn added(s: &mut App, on: Target, path: &str, tx: &mut Tx) {
+    let id = s.ws.add_project_on(on, path);
     s.draft_project = Some(id);
-    s.adding_project = false;
+    s.adding_project = None;
     s.add_project = TextEdit::new("");
     new_thread(s);
     mark_dirty(s, tx);
@@ -177,13 +282,13 @@ fn ensure_thread(s: &mut App, tx: &mut Tx) -> Option<String> {
     }
     let Some(project) = s.current_project().cloned() else {
         notice(s, tx, "Add a project first");
-        s.adding_project = true;
+        s.adding_project = Some(AddMode::Path);
         return None;
     };
     let provider = project
         .default_provider
         .or(s.ws.settings.default_provider)
-        .unwrap_or_else(|| first_installed(s));
+        .unwrap_or_else(|| first_installed(s, &project.target));
     let id = s.ws.create_thread(&project.id, provider, "", now());
     s.selected = Some(id.clone());
     if s.placement == Placement::Worktree {
@@ -191,13 +296,21 @@ fn ensure_thread(s: &mut App, tx: &mut Tx) -> Option<String> {
         let root = store::expand_home(&s.ws.settings.worktree_root);
         let path = format!("{root}/{}/{id}", project.name);
         s.waiting_worktree.insert(id.clone());
-        let (repo, thread) = (project.path.clone(), id.clone());
+        let (repo, thread) = (project.at(&project.path), id.clone());
+        let name = project.name.clone();
         s.bridge.spawn(move |b| {
-            let result =
+            // The worktree root setting is a local folder; WSL and SSH projects keep theirs in
+            // the target user's home.
+            let path = if repo.target == Target::Local {
                 std::fs::create_dir_all(Path::new(&path).parent().unwrap_or(Path::new(&path)))
+                    .map(|_| path)
                     .map_err(|e| e.to_string())
-                    .and_then(|_| git::worktree_add(&repo, &path, &slug))
-                    .map(|_| (path, slug));
+            } else {
+                target::make_home_dir(&repo.target, &format!(".oxlet/worktrees/{name}"))
+                    .map(|dir| format!("{dir}/{thread}"))
+            };
+            let result =
+                path.and_then(|path| git::worktree_add(&repo, &path, &slug).map(|_| (path, slug)));
             b.send(Event::WorktreeReady { thread, result });
         });
     } else if let Some(t) = s.ws.thread_mut(&id) {
@@ -206,10 +319,10 @@ fn ensure_thread(s: &mut App, tx: &mut Tx) -> Option<String> {
     Some(id)
 }
 
-fn first_installed(s: &App) -> ProviderId {
+fn first_installed(s: &App, on: &Target) -> ProviderId {
     s.providers
-        .iter()
-        .find(|(_, b)| b.is_some())
+        .get(on)
+        .and_then(|found| found.iter().find(|(_, b)| b.is_some()))
         .map_or(ProviderId::Claude, |(id, _)| *id)
 }
 
@@ -230,14 +343,28 @@ pub fn start_turn(s: &mut App, thread: &str, prompt: &str, tx: &mut Tx) {
         m.agent = Some((t.provider, t.model.clone()));
     }
     let info = t.provider.info();
-    let Some(program) = s.binary(t.provider) else {
-        let error = format!(
-            "{} is not installed. Install {} and make sure `{}` is on your PATH, or set its path in Settings → Agent providers.",
-            info.name, info.runtime, info.binary
-        );
-        finish_message(s, thread, &message, Some(error), None);
-        mark_dirty(s, tx);
-        return;
+    let program = match (
+        s.binary(&project.target, t.provider),
+        project.target.label(),
+    ) {
+        (Some(Some(path)), _) => path,
+        // Until detection there answers, the target's login shell finds the CLI itself.
+        (None, Some(_)) => PathBuf::from(info.binary),
+        (_, place) => {
+            let error = match place {
+                None => format!(
+                    "{} is not installed. Install {} and make sure `{}` is on your PATH, or set its path in Settings → Agent providers.",
+                    info.name, info.runtime, info.binary
+                ),
+                Some(place) => format!(
+                    "{} is not installed on {place}. Install {} there and make sure `{}` is on the login shell's PATH.",
+                    info.name, info.runtime, info.binary
+                ),
+            };
+            finish_message(s, thread, &message, Some(error), None);
+            mark_dirty(s, tx);
+            return;
+        }
     };
     let mut prompt = match &t.goal {
         Some(goal) => format!("{prompt}\n\n(Thread goal: {goal})"),
@@ -255,7 +382,7 @@ pub fn start_turn(s: &mut App, thread: &str, prompt: &str, tx: &mut Tx) {
         access: t.access,
         mode: t.mode,
         session: t.session.clone(),
-        cwd: t.cwd(&project).to_owned(),
+        place: project.at(t.cwd(&project)),
     };
     let bridge = s.bridge.clone();
     let id = thread.to_owned();
@@ -380,18 +507,20 @@ pub fn retry(s: &mut App, thread: &str, tx: &mut Tx) {
 
 pub fn open_in_editor(s: &mut App, index: usize, tx: &mut Tx) {
     s.popup = None;
-    let (Some(editor), Some(cwd)) = (s.editors.get(index).cloned(), s.cwd()) else {
+    let (Some(editor), Some(at)) = (s.editors.get(index).cloned(), s.place()) else {
         return;
     };
-    if let Err(e) = oxlet_core::open::in_editor(&editor, &cwd) {
+    if let Err(e) = oxlet_core::open::in_editor(&editor, &at) {
         notice(s, tx, format!("Could not open {}: {e}", editor.name));
     }
 }
 
 pub fn reveal(s: &mut App, tx: &mut Tx) {
     s.popup = None;
-    let Some(cwd) = s.cwd() else { return };
-    if let Err(e) = oxlet_core::open::reveal(&cwd) {
+    let Some(path) = s.place().and_then(|at| at.local_path()) else {
+        return;
+    };
+    if let Err(e) = oxlet_core::open::reveal(&path.to_string_lossy()) {
         notice(
             s,
             tx,
@@ -400,9 +529,16 @@ pub fn reveal(s: &mut App, tx: &mut Tx) {
     }
 }
 
-/// Mentions dropped files in the composer.
+/// Mentions dropped files in the composer. Dropped files are local, so only local projects
+/// take them.
 pub fn drop_files(s: &mut App, paths: &[PathBuf]) {
-    let Some(root) = s.cwd() else { return };
+    let Some(root) = s
+        .place()
+        .filter(|at| at.target == Target::Local)
+        .map(|at| at.cwd)
+    else {
+        return;
+    };
     let mut text = s.composer.text.trim_end().to_owned();
     if !text.is_empty() {
         text.push(' ');
@@ -572,16 +708,16 @@ fn with_message(s: &mut App, thread: &str, message: &str, f: impl FnOnce(&mut Ve
 }
 
 fn collect_edits(s: &App, thread: &str, message: &str, edited: BTreeSet<String>) {
-    let Some(cwd) =
+    let Some(at) =
         s.ws.thread(thread)
-            .and_then(|t| s.ws.project(&t.project).map(|p| t.cwd(p).to_owned()))
+            .and_then(|t| s.ws.project(&t.project).map(|p| p.at(t.cwd(p))))
     else {
         return;
     };
     let (thread, message) = (thread.to_owned(), message.to_owned());
     s.bridge.spawn(move |b| {
         let slash = |p: &str| p.replace('\\', "/");
-        let prefix = format!("{}/", slash(&cwd).trim_end_matches('/'));
+        let prefix = format!("{}/", slash(&at.cwd).trim_end_matches('/'));
         let wanted: BTreeSet<String> = edited
             .iter()
             .map(|p| {
@@ -589,21 +725,22 @@ fn collect_edits(s: &App, thread: &str, message: &str, edited: BTreeSet<String>)
                 p.strip_prefix(&prefix).map(str::to_owned).unwrap_or(p)
             })
             .collect();
-        let mut files: Vec<FileChange> = git::numstat(&cwd)
+        let mut files: Vec<FileChange> = git::numstat(&at)
             .unwrap_or_default()
             .into_iter()
             .filter(|c| wanted.contains(&c.path))
             .collect();
-        for path in &wanted {
-            if !files.iter().any(|f| &f.path == path) {
-                let added = std::fs::read_to_string(Path::new(&cwd).join(path))
-                    .map_or(0, |t| t.lines().count() as u32);
-                files.push(FileChange {
-                    path: path.clone(),
-                    added,
-                    removed: 0,
-                });
-            }
+        let new: Vec<String> = wanted
+            .into_iter()
+            .filter(|path| !files.iter().any(|f| &f.path == path))
+            .collect();
+        let texts = target::read_texts(&at, &new, u64::from(u32::MAX));
+        for (path, text) in new.into_iter().zip(texts) {
+            files.push(FileChange {
+                path,
+                added: text.lines().count() as u32,
+                removed: 0,
+            });
         }
         b.send(Event::TurnEdits {
             thread,
@@ -782,10 +919,11 @@ pub fn run_command(s: &mut App, command: Command, arg: &str, tx: &mut Tx) {
 }
 
 pub fn refresh_repo(s: &mut App) {
-    let Some(cwd) = s.cwd() else {
+    let Some(cwd) = s.place() else {
         s.repo = Default::default();
         return;
     };
+    ensure_providers(s, &cwd.target);
     if s.repo.cwd != cwd {
         s.repo = crate::state::Repo {
             cwd: cwd.clone(),
@@ -804,28 +942,28 @@ pub fn refresh_repo(s: &mut App) {
     });
 }
 
-fn snapshot(cwd: &str) -> Result<RepoSnapshot, String> {
-    if !git::is_repo(cwd) {
+fn snapshot(cwd: &Place) -> Result<RepoSnapshot, String> {
+    if !git::is_repo(cwd)? {
         return Err("Not a git repository".into());
     }
     let status = git::status(cwd)?;
     let patch = git::diff(cwd)?;
     let mut changes = git::numstat(cwd)?;
     let mut untracked = Vec::new();
-    for entry in status.entries.iter().filter(|e| e.untracked()) {
-        let path = Path::new(cwd).join(&entry.path);
-        let small = std::fs::metadata(&path).is_ok_and(|m| m.len() <= MAX_UNTRACKED_PREVIEW);
-        let text = if small {
-            std::fs::read_to_string(&path).unwrap_or_default()
-        } else {
-            String::new()
-        };
+    let paths: Vec<String> = status
+        .entries
+        .iter()
+        .filter(|e| e.untracked())
+        .map(|e| e.path.clone())
+        .collect();
+    let texts = target::read_texts(cwd, &paths, MAX_UNTRACKED_PREVIEW);
+    for (path, text) in paths.into_iter().zip(texts) {
         changes.push(FileChange {
-            path: entry.path.clone(),
+            path: path.clone(),
             added: text.lines().count() as u32,
             removed: 0,
         });
-        untracked.push((entry.path.clone(), text));
+        untracked.push((path, text));
     }
     Ok(RepoSnapshot {
         status,
@@ -837,7 +975,7 @@ fn snapshot(cwd: &str) -> Result<RepoSnapshot, String> {
     })
 }
 
-pub fn apply_repo(s: &mut App, cwd: String, result: Result<RepoSnapshot, String>) {
+pub fn apply_repo(s: &mut App, cwd: Place, result: Result<RepoSnapshot, String>) {
     if s.repo.cwd != cwd {
         return;
     }
@@ -863,7 +1001,7 @@ pub fn apply_repo(s: &mut App, cwd: String, result: Result<RepoSnapshot, String>
     }
 }
 
-pub fn apply_files(s: &mut App, cwd: String, result: Result<Vec<String>, String>) {
+pub fn apply_files(s: &mut App, cwd: Place, result: Result<Vec<String>, String>) {
     if s.repo.cwd != cwd {
         return;
     }
@@ -874,7 +1012,7 @@ pub fn apply_files(s: &mut App, cwd: String, result: Result<Vec<String>, String>
 }
 
 pub fn git_action(s: &mut App, what: &'static str, tx: &mut Tx) {
-    let Some(cwd) = s.cwd() else { return };
+    let Some(cwd) = s.place() else { return };
     let message = s.commit_message.text.trim().to_owned();
     let commits = what.starts_with("commit");
     if commits && message.is_empty() {
@@ -899,7 +1037,7 @@ pub fn git_action(s: &mut App, what: &'static str, tx: &mut Tx) {
 }
 
 pub fn checkout(s: &mut App, branch: String, tx: &mut Tx) {
-    let Some(cwd) = s.cwd() else { return };
+    let Some(cwd) = s.place() else { return };
     s.bridge.spawn(move |b| {
         let result = git::checkout(&cwd, &branch, false).map(|_| format!("Switched to {branch}"));
         b.send(Event::GitDone { cwd, result });
@@ -909,7 +1047,7 @@ pub fn checkout(s: &mut App, branch: String, tx: &mut Tx) {
 }
 
 pub fn discard(s: &mut App, path: String) {
-    let Some(cwd) = s.cwd() else { return };
+    let Some(cwd) = s.place() else { return };
     let untracked = s
         .repo
         .status
@@ -923,7 +1061,7 @@ pub fn discard(s: &mut App, path: String) {
 }
 
 pub fn load_prs(s: &mut App) {
-    let Some(cwd) = s.cwd() else {
+    let Some(cwd) = s.place() else {
         s.prs = Some(Err("Add a project to see its pull requests".into()));
         return;
     };
@@ -936,7 +1074,7 @@ pub fn run_terminal(s: &mut App, tx: &mut Tx) {
     if command.is_empty() {
         return;
     }
-    let Some(cwd) = s.cwd() else {
+    let Some(cwd) = s.place() else {
         notice(s, tx, "Add a project first");
         return;
     };

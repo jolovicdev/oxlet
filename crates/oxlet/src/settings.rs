@@ -1,5 +1,6 @@
 use oxlet_core::model::{AccessMode, Density, Palette, ThemeMode};
 use oxlet_core::provider::{PROVIDERS, ProviderId};
+use oxlet_core::target::Target;
 use oxlet_core::{git, store};
 use rune::{Color, El, ScrollSpec, TextEdit, Tx, col, icon, row, text};
 use rune_kit::shell::SidebarRow;
@@ -697,7 +698,7 @@ fn providers(s: &App, k: &Kit) -> El {
     let c = &k.c;
     let mut rows = Vec::new();
     for p in PROVIDERS {
-        let found = s.binary(p.id);
+        let found = s.binary(&Target::Local, p.id).flatten();
         let shown = !s.ws.settings.hidden_providers.contains(&p.id);
         let id = p.id;
         let status = match &found {
@@ -893,7 +894,7 @@ fn worktrees(s: &App, k: &Kit) -> El {
         let (id, repo) = (
             t.id.clone(),
             s.ws.project(&t.project)
-                .map(|p| p.path.clone())
+                .map(|p| p.at(&p.path))
                 .unwrap_or_default(),
         );
         list.push(

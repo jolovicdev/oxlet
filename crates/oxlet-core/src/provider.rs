@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::{AccessMode, ChatMode, Effort};
+use crate::target::Place;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -167,7 +168,7 @@ pub struct TurnRequest {
     pub access: AccessMode,
     pub mode: ChatMode,
     pub session: Option<String>,
-    pub cwd: String,
+    pub place: Place,
 }
 
 /// The program arguments for one turn, not including the program itself.
@@ -523,7 +524,7 @@ mod tests {
             access: AccessMode::FullAccess,
             mode: ChatMode::Default,
             session: Some("abc".into()),
-            cwd: "/x".into(),
+            place: Place::local("/x"),
         }
     }
 

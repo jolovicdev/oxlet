@@ -349,7 +349,7 @@ fn terminal(s: &App, k: &Kit) -> El {
             TextInput::new(&s.terminal.input)
                 .width(None)
                 .plain()
-                .placeholder(s.cwd().unwrap_or_default())
+                .placeholder(s.place().map(|at| at.cwd).unwrap_or_default())
                 .text_style(mono)
                 .on_edit(|s: &mut App| &mut s.terminal.input)
                 .on_key(|s: &mut App, ev, _| {

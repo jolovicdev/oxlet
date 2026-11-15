@@ -3,9 +3,7 @@ use std::time::Duration;
 
 use rune::{Cx, El, Spring, col, icon, row, text};
 use rune_kit::shell::{PaneMotion, SidebarPeek, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{
-    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Select, TextInput,
-};
+use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Select};
 use rune_theme_opencode::icons;
 
 use crate::state::{App, DockTab, Popup, Screen};
@@ -236,28 +234,39 @@ fn open_in(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .trigger(button)
         .open(s.popup == Some(Popup::OpenIn))
         .min_width(220.0);
+    let place = s.place();
+    let remote = place
+        .as_ref()
+        .is_some_and(|at| at.target != oxlet_core::target::Target::Local);
+    let mut editors = 0;
     for (i, editor) in s.editors.iter().enumerate() {
+        if remote && !editor.remote {
+            continue;
+        }
+        editors += 1;
         menu = menu.item(
             rune_kit::MenuItem::new(format!("Open in {}", editor.name))
                 .icon(&icons::CODE)
                 .on_select_tx(move |s: &mut App, tx| actions::open_in_editor(s, i, tx)),
         );
     }
-    if !s.editors.is_empty() {
+    if editors > 0 {
         menu = menu.separator();
     }
+    if place.and_then(|at| at.local_path()).is_some() {
+        menu = menu.item(
+            rune_kit::MenuItem::new(format!("Reveal in {}", oxlet_core::open::file_manager()))
+                .icon(&icons::FOLDER)
+                .on_select_tx(actions::reveal),
+        );
+    }
     menu.item(
-        rune_kit::MenuItem::new(format!("Reveal in {}", oxlet_core::open::file_manager()))
-            .icon(&icons::FOLDER)
-            .on_select_tx(actions::reveal),
-    )
-    .item(
         rune_kit::MenuItem::new("Copy path")
             .icon(&icons::COPY)
             .on_select_tx(|s: &mut App, tx| {
                 s.popup = None;
-                if let Some(cwd) = s.cwd() {
-                    tx.copy(cwd);
+                if let Some(at) = s.place() {
+                    tx.copy(at.cwd);
                 }
             }),
     )
@@ -311,7 +320,13 @@ fn hero(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             .color(c.text_strong),
     );
     if s.ws.projects.is_empty() {
-        return out
+        let more = Button::new("Other locations")
+            .variant(ButtonVariant::Ghost)
+            .expanded(s.popup == Some(Popup::AddProject("hero")))
+            .on_press(|s: &mut App| sidebar::toggle_add_menu(s, "hero"))
+            .build(k)
+            .key("hero-more");
+        out = out
             .child(
                 text("Add a project folder to start a thread in it.")
                     .font(k.ty.body)
@@ -319,34 +334,28 @@ fn hero(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             )
             .child(
                 row()
-                    .w_full()
-                    .max_w(460.0)
                     .gap(8.0)
-                    .child(
-                        TextInput::new(&s.add_project)
-                            .width(None)
-                            .placeholder("/path/to/project")
-                            .leading_icon(&icons::FOLDER)
-                            .on_edit(|s: &mut App| &mut s.add_project)
-                            .on_submit(|s: &mut App, tx| {
-                                let path = s.add_project.text.clone();
-                                actions::add_project(s, &path, tx);
-                            })
-                            .build(k)
-                            .grow(1.0)
-                            .key("hero-path"),
-                    )
+                    .center_y()
                     .child(
                         Button::new("Add project")
                             .variant(ButtonVariant::Submit)
-                            .on_press_tx(|s: &mut App, tx| {
-                                let path = s.add_project.text.clone();
-                                actions::add_project(s, &path, tx);
-                            })
+                            .icon(&icons::FOLDER_ADD_LEFT)
+                            .on_press_tx(|s: &mut App, tx| actions::pick_folder(s, None, tx))
                             .build(k)
                             .key("hero-add"),
-                    ),
+                    )
+                    .child(sidebar::add_menu(s, k, layer, "hero", more)),
             );
+        if let Some(mode) = s.adding_project {
+            out = out.child(
+                col()
+                    .w_full()
+                    .max_w(460.0)
+                    .gap(2.0)
+                    .children(sidebar::add_field(s, k, mode, "hero-path")),
+            );
+        }
+        return out;
     }
     let names: Vec<&str> = s.ws.projects.iter().map(|p| p.name.as_str()).collect();
     let current = s.current_project().map(|p| p.name.as_str());

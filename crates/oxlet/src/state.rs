@@ -7,6 +7,7 @@ use oxlet_core::git::{self, Commit, PullRequest};
 use oxlet_core::model::{FileChange, Id, Workspace};
 use oxlet_core::process::Running;
 use oxlet_core::provider::{AgentEvent, ProviderId};
+use oxlet_core::target::{Place, Target};
 use rune::{TextEdit, Waker};
 use rune_kit::diff::DiffState;
 use rune_kit::shell::PaneState;
@@ -83,6 +84,15 @@ pub enum Popup {
     NewAutomationProject,
     NewAutomationSchedule,
     OpenIn,
+    /// The other ways to add a project, from the menu keyed by this name.
+    AddProject(&'static str),
+}
+
+/// What the add-project field takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddMode {
+    Path,
+    Ssh,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,7 +103,7 @@ pub enum Placement {
 
 #[derive(Default)]
 pub struct Repo {
-    pub cwd: String,
+    pub cwd: Place,
     pub loading: bool,
     pub error: Option<String>,
     pub status: git::Status,
@@ -142,16 +152,25 @@ pub enum Event {
         files: Vec<FileChange>,
     },
     Repo {
-        cwd: String,
+        cwd: Place,
         result: Result<RepoSnapshot, String>,
     },
     Files {
-        cwd: String,
+        cwd: Place,
         result: Result<Vec<String>, String>,
     },
     Term(oxlet_core::process::Line),
     Prs(Result<Vec<PullRequest>, String>),
-    Providers(Vec<(ProviderId, Option<PathBuf>)>),
+    Providers(Target, Vec<(ProviderId, Option<PathBuf>)>),
+    Distros(Vec<String>),
+    SshHosts(Vec<String>),
+    /// A WSL or SSH folder to add as a project: its absolute path, or why it can't be one.
+    FolderChecked {
+        target: Target,
+        result: Result<String, String>,
+    },
+    /// The Windows folder dialog's answer, when Oxlet runs inside WSL.
+    PickedFolder(Result<Option<String>, String>),
     Editors(Vec<oxlet_core::open::Editor>),
     WorktreeReady {
         thread: Id,
@@ -159,7 +178,7 @@ pub enum Event {
     },
     Notice(String),
     GitDone {
-        cwd: String,
+        cwd: Place,
         result: Result<String, String>,
     },
 }
@@ -224,7 +243,7 @@ pub struct App {
     pub renaming: Option<Id>,
     pub rename: TextEdit,
     pub add_project: TextEdit,
-    pub adding_project: bool,
+    pub adding_project: Option<AddMode>,
     pub commit_message: TextEdit,
     pub notes: TextEdit,
     pub notes_for: Option<Id>,
@@ -239,8 +258,11 @@ pub struct App {
     pub provider_path: HashMap<ProviderId, TextEdit>,
     pub model_fields: HashMap<ProviderId, TextEdit>,
 
-    pub providers: Vec<(ProviderId, Option<PathBuf>)>,
+    /// The agent CLIs found on each target; an empty list while detection there runs.
+    pub providers: HashMap<Target, Vec<(ProviderId, Option<PathBuf>)>>,
     pub editors: Vec<oxlet_core::open::Editor>,
+    pub distros: Vec<String>,
+    pub ssh_hosts: Vec<String>,
     pub window_focused: bool,
     pub turns: HashMap<Id, Turn>,
     pub queued: HashMap<Id, VecDeque<String>>,
@@ -286,7 +308,7 @@ impl App {
             renaming: None,
             rename: TextEdit::new(""),
             add_project: TextEdit::new(""),
-            adding_project: false,
+            adding_project: None,
             commit_message: TextEdit::new(""),
             notes: TextEdit::new(""),
             notes_for: None,
@@ -298,8 +320,10 @@ impl App {
             hex_fields: HashMap::new(),
             provider_path: HashMap::new(),
             model_fields: HashMap::new(),
-            providers: Vec::new(),
+            providers: HashMap::new(),
             editors: Vec::new(),
+            distros: Vec::new(),
+            ssh_hosts: Vec::new(),
             window_focused: true,
             turns: HashMap::new(),
             queued: HashMap::new(),
@@ -356,19 +380,21 @@ impl App {
     }
 
     /// The folder the dock's tools work in: the thread's worktree, else its project.
-    pub fn cwd(&self) -> Option<String> {
+    pub fn place(&self) -> Option<Place> {
         let project = self.current_project()?;
         Some(match self.thread() {
-            Some(t) => t.cwd(project).to_owned(),
-            None => project.path.clone(),
+            Some(t) => project.at(t.cwd(project)),
+            None => project.at(&project.path),
         })
     }
 
-    pub fn binary(&self, id: ProviderId) -> Option<PathBuf> {
+    /// Where `id`'s CLI is on `target`; `None` until detection there has answered.
+    pub fn binary(&self, target: &Target, id: ProviderId) -> Option<Option<PathBuf>> {
         self.providers
+            .get(target)?
             .iter()
             .find(|(p, _)| *p == id)
-            .and_then(|(_, b)| b.clone())
+            .map(|(_, b)| b.clone())
     }
 
     pub fn is_collapsed(&self, key: &str) -> bool {

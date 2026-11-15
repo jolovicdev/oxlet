@@ -1,12 +1,14 @@
+use std::path::PathBuf;
+
 use oxlet_core::model::{Thread, ThreadStatus};
 use oxlet_core::time::{self, Bucket};
 use rune::{El, TextEdit, Tx, icon, row, text};
 use rune_kit::shell::{RowStatus, Sidebar, SidebarRow, SidebarSection};
-use rune_kit::{IconButton, IconButtonVariant, Kit, MenuItem, TextInput, context_menu};
+use rune_kit::{IconButton, IconButtonVariant, Kit, Menu, MenuItem, TextInput, context_menu};
 use rune_theme_opencode::icons;
 
 use crate::actions::{self, mark_dirty};
-use crate::state::{App, Screen, Section};
+use crate::state::{AddMode, App, Popup, Screen, Section};
 use crate::theme;
 
 fn compact(s: &App) -> bool {
@@ -50,7 +52,7 @@ pub fn view(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     }
     sb = sb.header(primary_row(s, k)).header(destinations(s, k));
 
-    sb = sb.section(projects(s, k));
+    sb = sb.section(projects(s, k, layer));
 
     let query = s.search.text.trim().to_lowercase();
     let now = actions::now();
@@ -233,33 +235,121 @@ fn destinations(s: &App, k: &Kit) -> El {
     bar
 }
 
-fn projects(s: &App, k: &Kit) -> SidebarSection {
-    let current = s.current_project().map(|p| p.id.clone());
-    let add = IconButton::new(&icons::PLUS_SMALL)
-        .variant(IconButtonVariant::GhostMuted)
-        .label("Add project")
-        .on_press(|s: &mut App| {
-            s.adding_project = !s.adding_project;
-            s.add_project = TextEdit::new("");
-            s.add_project.focused = s.adding_project;
-        })
-        .build(k)
-        .key("project-add");
-    let mut rows: Vec<El> = Vec::new();
-    if s.adding_project {
-        rows.push(
-            TextInput::new(&s.add_project)
-                .width(None)
-                .placeholder("/path/to/project")
-                .leading_icon(&icons::FOLDER)
-                .on_edit(|s: &mut App| &mut s.add_project)
-                .on_submit(|s: &mut App, tx| {
-                    let path = s.add_project.text.clone();
-                    actions::add_project(s, &path, tx);
-                })
-                .build(k)
-                .key("project-path"),
+/// The empty workspace's hero offers adding a project, so the sidebar leaves it to that.
+pub fn hero_adds(s: &App) -> bool {
+    s.ws.projects.is_empty() && s.screen == Screen::Thread && s.selected.is_none()
+}
+
+pub fn toggle_add_menu(s: &mut App, menu: &'static str) {
+    s.popup = if s.popup == Some(Popup::AddProject(menu)) {
+        None
+    } else {
+        Some(Popup::AddProject(menu))
+    };
+}
+
+/// The other places a project can come from: a WSL distro, an SSH host or a typed path.
+pub fn add_menu(s: &App, k: &Kit, layer: &mut Vec<El>, menu: &'static str, trigger: El) -> El {
+    let mut m = Menu::new(format!("add-project-{menu}"))
+        .trigger(trigger)
+        .open(s.popup == Some(Popup::AddProject(menu)))
+        .min_width(220.0);
+    for distro in &s.distros {
+        let start = PathBuf::from(format!(r"\\wsl.localhost\{distro}\"));
+        m = m.item(
+            MenuItem::new("WSL folder…")
+                .icon(&icons::MONITOR)
+                .description(distro.clone())
+                .on_select_tx(move |s: &mut App, tx| {
+                    actions::pick_folder(s, Some(start.clone()), tx)
+                }),
         );
+    }
+    m.item(
+        MenuItem::new("SSH remote…")
+            .icon(&icons::SERVER)
+            .on_select(|s: &mut App| actions::start_adding(s, AddMode::Ssh)),
+    )
+    .item(
+        MenuItem::new("Enter path…")
+            .icon(&icons::PENCIL_LINE)
+            .on_select(|s: &mut App| actions::start_adding(s, AddMode::Path)),
+    )
+    .on_close(|s: &mut App| s.popup = None)
+    .build(k, layer)
+}
+
+/// The add-project field, with the hosts from `~/.ssh/config` below it for an SSH location.
+pub fn add_field(s: &App, k: &Kit, mode: AddMode, key: &str) -> Vec<El> {
+    let ssh = mode == AddMode::Ssh;
+    let mut out = vec![
+        TextInput::new(&s.add_project)
+            .width(None)
+            .placeholder(if ssh {
+                "user@host:/path/to/project"
+            } else {
+                "/path/to/project"
+            })
+            .leading_icon(if ssh { &icons::SERVER } else { &icons::FOLDER })
+            .on_edit(|s: &mut App| &mut s.add_project)
+            .on_key(|s: &mut App, ev, _| {
+                if ev.key == rune::Key::Escape {
+                    s.adding_project = None;
+                    return true;
+                }
+                false
+            })
+            .on_submit(|s: &mut App, tx| {
+                let path = s.add_project.text.clone();
+                actions::add_project(s, &path, tx);
+            })
+            .build(k)
+            .key(key),
+    ];
+    let typed = s.add_project.text.trim();
+    if ssh && !typed.contains(':') {
+        for host in s.ssh_hosts.iter().filter(|h| h.starts_with(typed)).take(6) {
+            let pick = format!("{host}:");
+            out.push(
+                SidebarRow::new(host.clone())
+                    .icon(&icons::SERVER)
+                    .height(nav_h(s))
+                    .on_select(move |s: &mut App, _| {
+                        s.add_project = TextEdit::new(pick.clone());
+                        s.add_project.focused = true;
+                    })
+                    .build(k)
+                    .key(format!("ssh-host-{host}")),
+            );
+        }
+    }
+    out
+}
+
+fn projects(s: &App, k: &Kit, layer: &mut Vec<El>) -> SidebarSection {
+    let current = s.current_project().map(|p| p.id.clone());
+    let more = IconButton::new(&icons::OUTLINE_CHEVRON_DOWN)
+        .variant(IconButtonVariant::GhostMuted)
+        .label("Other ways to add a project")
+        .expanded(s.popup == Some(Popup::AddProject("sidebar")))
+        .on_press(|s: &mut App| toggle_add_menu(s, "sidebar"))
+        .build(k)
+        .key("project-add-more");
+    let add = row()
+        .gap(2.0)
+        .center_y()
+        .child(
+            IconButton::new(&icons::PLUS_SMALL)
+                .variant(IconButtonVariant::GhostMuted)
+                .label("Add project")
+                .on_press_tx(|s: &mut App, tx| actions::pick_folder(s, None, tx))
+                .build(k)
+                .key("project-add"),
+        )
+        .child(add_menu(s, k, layer, "sidebar", more));
+    let mut rows: Vec<El> = Vec::new();
+    if let Some(mode) = s.adding_project.filter(|_| !hero_adds(s)) {
+        rows.extend(add_field(s, k, mode, "project-path"));
     }
     for p in &s.ws.projects {
         let id = p.id.clone();
@@ -282,6 +372,9 @@ fn projects(s: &App, k: &Kit) -> SidebarSection {
             });
         if busy > 0 {
             r = r.status(RowStatus::Busy);
+        }
+        if let Some(place) = p.target.label() {
+            r = r.detail(place.to_owned());
         }
         rows.push(r.build(k).key(format!("project-{}", p.id)));
     }

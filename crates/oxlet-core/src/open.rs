@@ -3,37 +3,56 @@ use std::process::Stdio;
 
 use crate::process::command;
 use crate::provider::locate;
+use crate::target::{Place, Target};
 
 /// A code editor Oxlet can open a folder or file in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Editor {
     pub name: &'static str,
     pub program: PathBuf,
+    /// Opens WSL and SSH folders through VS Code's `--remote`.
+    pub remote: bool,
 }
 
 /// Editors with a command-line launcher, in the order Oxlet offers them.
-const EDITORS: [(&str, &str); 5] = [
-    ("VS Code", "code"),
-    ("Cursor", "cursor"),
-    ("Zed", "zed"),
-    ("Windsurf", "windsurf"),
-    ("Sublime Text", "subl"),
+const EDITORS: [(&str, &str, bool); 5] = [
+    ("VS Code", "code", true),
+    ("Cursor", "cursor", true),
+    ("Zed", "zed", false),
+    ("Windsurf", "windsurf", true),
+    ("Sublime Text", "subl", false),
 ];
 
 /// The editors installed on `PATH` (or on `path_var`, for tests).
 pub fn editors(path_var: Option<&str>) -> Vec<Editor> {
     EDITORS
         .iter()
-        .filter_map(|(name, bin)| {
-            locate(bin, None, path_var).map(|program| Editor { name, program })
+        .filter_map(|&(name, bin, remote)| {
+            locate(bin, None, path_var).map(|program| Editor {
+                name,
+                program,
+                remote,
+            })
         })
         .collect()
 }
 
-/// Opens `target` in `editor` without waiting for it.
-pub fn in_editor(editor: &Editor, target: &str) -> std::io::Result<()> {
-    command(&editor.program)
-        .arg(target)
+/// Opens `at` in `editor` without waiting for it.
+pub fn in_editor(editor: &Editor, at: &Place) -> std::io::Result<()> {
+    let mut cmd = command(&editor.program);
+    match &at.target {
+        Target::Local => {}
+        Target::Wsl { distro } => {
+            cmd.args(["--remote", &format!("wsl+{distro}")]);
+        }
+        Target::Ssh { .. } => {
+            cmd.args([
+                "--remote",
+                &format!("ssh-remote+{}", at.target.label().unwrap_or_default()),
+            ]);
+        }
+    }
+    cmd.arg(&at.cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

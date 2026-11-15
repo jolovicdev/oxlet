@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::provider::ProviderId;
+use crate::target::{Place, Target};
 
 pub type Id = String;
 
@@ -8,9 +9,19 @@ pub type Id = String;
 pub struct Project {
     pub id: Id,
     pub name: String,
+    /// The path as seen on `target`.
     pub path: String,
     #[serde(default)]
+    pub target: Target,
+    #[serde(default)]
     pub default_provider: Option<ProviderId>,
+}
+
+impl Project {
+    /// `cwd`, a folder on this project's target.
+    pub fn at(&self, cwd: &str) -> Place {
+        Place::new(self.target.clone(), cwd)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -504,8 +515,16 @@ impl Workspace {
     }
 
     pub fn add_project(&mut self, path: &str) -> Id {
+        self.add_project_on(Target::Local, path)
+    }
+
+    pub fn add_project_on(&mut self, target: Target, path: &str) -> Id {
         let path = path.trim_end_matches('/').to_owned();
-        if let Some(p) = self.projects.iter().find(|p| p.path == path) {
+        if let Some(p) = self
+            .projects
+            .iter()
+            .find(|p| p.path == path && p.target == target)
+        {
             return p.id.clone();
         }
         let name = path
@@ -519,6 +538,7 @@ impl Workspace {
             id: id.clone(),
             name,
             path,
+            target,
             default_provider: None,
         });
         id
@@ -672,6 +692,21 @@ mod tests {
         let mut w = Workspace::default();
         assert_eq!(w.add_project("/a/b"), w.add_project("/a/b/"));
         assert_eq!(w.projects.len(), 1);
+        let host = Target::Ssh {
+            host: "devbox".into(),
+        };
+        assert_ne!(
+            w.add_project_on(host.clone(), "/a/b"),
+            w.add_project("/a/b")
+        );
+        assert_eq!(w.projects[1].target, host);
+    }
+
+    #[test]
+    fn projects_saved_before_targets_load_as_local() {
+        let p: Project =
+            serde_json::from_str(r#"{"id":"p1","name":"app","path":"/src/app"}"#).unwrap();
+        assert_eq!(p.target, Target::Local);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use oxlet_core::model::{Part, Role, ThreadStatus, Workspace};
 use oxlet_core::provider::ProviderId;
+use oxlet_core::target::{Place, Target};
 use rune::{Env, Runtime, TextEdit};
 
 use crate::state::App;
@@ -33,7 +34,7 @@ impl Sandbox {
             );
         }
         std::fs::write(repo.join("README.md"), "hello\n").unwrap();
-        oxlet_core::git::commit_all(repo.to_str().unwrap(), "init").unwrap();
+        oxlet_core::git::commit_all(&Place::local(repo.to_str().unwrap()), "init").unwrap();
         Sandbox { root }
     }
 
@@ -74,7 +75,7 @@ fn runtime(sandbox: &Sandbox, providers: Vec<(ProviderId, Option<PathBuf>)>) -> 
     ws.add_project(&sandbox.repo());
     let mut app = App::new(ws, sandbox.root.join("home"), 0);
     app.demo = true;
-    app.providers = providers;
+    app.providers.insert(Target::Local, providers);
     let mut rt = Runtime::new(
         app,
         crate::view::view,
@@ -543,4 +544,175 @@ fn dropped_files_become_mentions_in_the_composer() {
         crate::actions::drop_files(s, &[repo.join("README.md"), repo.join("src/lib.rs")]);
     });
     assert_eq!(rt.state.composer.text, "Look at @README.md @src/lib.rs ");
+}
+
+#[test]
+fn add_project_picks_a_folder_in_the_dialog() {
+    let sb = Sandbox::new("pick");
+    let other = sb.root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let mut rt = runtime(&sb, vec![]);
+    click(&mut rt, "project-add");
+    assert_eq!(
+        rt.file_dialog().map(|(kind, _)| kind),
+        Some(rune::FileDialogKind::Folder)
+    );
+    rt.resolve_file_dialog(Some(other.clone())).unwrap();
+    rt.frame(1.0 / 60.0);
+    let added = rt.state.current_project().unwrap();
+    assert_eq!(added.path, other.to_string_lossy());
+    assert_eq!(added.target, Target::Local);
+    assert_eq!(rt.state.ws.projects.len(), 2);
+}
+
+#[test]
+fn a_cancelled_folder_dialog_changes_nothing() {
+    let sb = Sandbox::new("pick-cancel");
+    let mut rt = runtime(&sb, vec![]);
+    let before = rt.state.ws.clone();
+    click(&mut rt, "project-add");
+    rt.resolve_file_dialog(None).unwrap();
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.ws, before);
+    assert!(rt.state.adding_project.is_none() && rt.state.toast.is_none());
+}
+
+/// A stand-in ssh client for every test in this run: it logs the host it was given, then runs
+/// the remote command here, in a session of its own as sshd would, so stopping the client does
+/// not reach it.
+fn fake_ssh() -> PathBuf {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    let dir = std::env::temp_dir().join("oxlet-e2e-ssh");
+    ONCE.call_once(|| {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("home")).unwrap();
+        let script = dir.join("ssh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nprintf '%s\\n' \"$2\" >> \"$0.log\"\nshift 2\nexport HOME=\"${0%/*}/home\" SHELL=/bin/sh\nexec setsid -w sh -c \"$*\"\n",
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .args(["+x", script.to_str().unwrap()])
+            .status()
+            .unwrap();
+        // SAFETY: the tests read the environment only through std, whose lock orders this write
+        // with their reads.
+        unsafe { std::env::set_var("OXLET_SSH", &script) };
+    });
+    dir.join("ssh.log")
+}
+
+#[test]
+fn an_ssh_project_runs_its_turns_and_git_through_the_host() {
+    let sb = Sandbox::new("ssh");
+    let repo = sb.repo();
+    let log = fake_ssh();
+    let host = Target::Ssh {
+        host: "me@devbox-turn".into(),
+    };
+    let claude = sb.agent(
+        "claude",
+        &format!(
+            r#"printf 'changed\n' >> '{repo}/README.md'
+printf 'one\ntwo\nthree\n' > '{repo}/notes.md'
+for piece in 'Done ' 'remotely'; do
+  printf '{{"type":"stream_event","event":{{"type":"content_block_delta","delta":{{"type":"text_delta","text":"%s"}}}}}}\n' "$piece"
+done
+echo '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Write","input":{{"file_path":"{repo}/notes.md"}}}}]}}}}'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Done remotely."}}]}}}}'
+echo '{{"type":"result","is_error":false,"session_id":"r1"}}'"#
+        ),
+    );
+    let mut rt = runtime(&sb, vec![]);
+    rt.update(|s, tx| {
+        s.ws.projects.clear();
+        s.providers
+            .insert(host.clone(), vec![(ProviderId::Claude, Some(claude))]);
+        crate::actions::add_project(s, &format!("me@devbox-turn:{repo}"), tx);
+    });
+    pump(&mut rt, |s| !s.ws.projects.is_empty());
+    let project = &rt.state.ws.projects[0];
+    assert_eq!(
+        (&project.target, project.path.as_str()),
+        (&host, repo.as_str())
+    );
+
+    send(&mut rt, "Change something");
+    pump(&mut rt, |s| {
+        idle(s) && s.thread().is_some_and(|t| t.last_change().is_some())
+    });
+    let t = thread(&rt);
+    assert_eq!(t.messages[1].text(), "Done remotely.");
+    assert_eq!(t.last_change().unwrap()[0].path, "notes.md");
+    assert_eq!(t.last_change().unwrap()[0].added, 3);
+
+    pump(&mut rt, |s| !s.repo.loading && s.repo.changes.len() == 2);
+    assert_eq!(rt.state.repo.cwd.target, host);
+    assert_eq!(rt.state.repo.status.branch.as_deref(), Some("main"));
+    let changes: Vec<(&str, u32)> = rt
+        .state
+        .repo
+        .changes
+        .iter()
+        .map(|c| (c.path.as_str(), c.added))
+        .collect();
+    assert_eq!(changes, [("README.md", 1), ("notes.md", 3)]);
+    assert!(
+        std::fs::read_to_string(log)
+            .unwrap()
+            .contains("me@devbox-turn\n")
+    );
+}
+
+#[test]
+fn stopping_an_ssh_turn_ends_the_remote_program() {
+    let sb = Sandbox::new("ssh-stop");
+    fake_ssh();
+    let pid_file = sb.root.join("agent.pid");
+    let claude = sb.agent(
+        "claude",
+        &format!("echo $$ > '{}'\nexec sleep 30", pid_file.display()),
+    );
+    let host = Target::Ssh {
+        host: "devbox-stop".into(),
+    };
+    let mut rt = runtime(&sb, vec![]);
+    rt.update(|s, _| {
+        s.ws.projects[0].target = host.clone();
+        s.providers
+            .insert(host.clone(), vec![(ProviderId::Claude, Some(claude))]);
+    });
+    send(&mut rt, "long job");
+    pump(&mut rt, |_| {
+        std::fs::read_to_string(&pid_file).is_ok_and(|p| p.ends_with('\n'))
+    });
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_owned();
+    rt.update(|s, tx| {
+        crate::on_key(
+            s,
+            &rune::KeyEvent {
+                key: rune::Key::Escape,
+                mods: Default::default(),
+            },
+            tx,
+        );
+    });
+    pump(&mut rt, idle);
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    let start = Instant::now();
+    while alive() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!alive(), "the remote agent outlived its stopped turn");
 }

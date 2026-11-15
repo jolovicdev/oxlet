@@ -69,8 +69,16 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
             Event::Files { cwd, result } => actions::apply_files(s, cwd, result),
             Event::Term(line) => actions::apply_terminal(s, line),
             Event::Prs(result) => s.prs = Some(result),
-            Event::Providers(found) => s.providers = found,
+            Event::Providers(target, found) => {
+                s.providers.insert(target, found);
+            }
             Event::Editors(found) => s.editors = found,
+            Event::Distros(found) => s.distros = found,
+            Event::SshHosts(found) => s.ssh_hosts = found,
+            Event::FolderChecked { target, result } => {
+                actions::folder_checked(s, target, result, tx)
+            }
+            Event::PickedFolder(result) => actions::picked_folder(s, result, tx),
             Event::WorktreeReady { thread, result } => {
                 actions::worktree_ready(s, &thread, result, tx)
             }
@@ -220,12 +228,25 @@ fn scene_open(s: &mut App) {
         oxlet_core::open::Editor {
             name: "VS Code",
             program: "code".into(),
+            remote: true,
         },
         oxlet_core::open::Editor {
             name: "Zed",
             program: "zed".into(),
+            remote: false,
         },
     ];
+}
+
+fn scene_add(s: &mut App) {
+    s.selected = None;
+    s.popup = Some(Popup::AddProject("sidebar"));
+    s.distros = vec!["Ubuntu-24.04".into()];
+    if let Some(p) = s.ws.projects.get_mut(1) {
+        p.target = oxlet_core::target::Target::Ssh {
+            host: "me@devbox".into(),
+        };
+    }
 }
 
 fn scene_kanban(s: &mut App) {
@@ -264,6 +285,7 @@ const SCENES: &[Scene] = &[
     ("model", scene_model),
     ("palette", scene_palette),
     ("open", scene_open),
+    ("add", scene_add),
     ("kanban", scene_kanban),
     ("automations", scene_automations),
     ("settings", scene_settings),

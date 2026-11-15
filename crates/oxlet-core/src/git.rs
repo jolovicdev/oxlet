@@ -2,6 +2,7 @@ use serde::Deserialize;
 
 use crate::model::FileChange;
 use crate::process::output;
+use crate::target::Place;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
@@ -32,17 +33,23 @@ pub struct Commit {
     pub when: String,
 }
 
-fn git(cwd: &str, args: &[&str]) -> Result<String, String> {
-    output("git", args, cwd)
+fn git(at: &Place, args: &[&str]) -> Result<String, String> {
+    output("git", args, at)
 }
 
-pub fn is_repo(cwd: &str) -> bool {
-    git(cwd, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|s| s.trim() == "true")
+/// Whether `at` is inside a work tree; an error when its target can't be reached.
+pub fn is_repo(at: &Place) -> Result<bool, String> {
+    let out = crate::process::run("git", &["rev-parse", "--is-inside-work-tree"], at)
+        .map_err(|e| format!("git: {e}"))?;
+    match at.target.failure(&out) {
+        Some(e) => Err(e),
+        None => Ok(out.status.success() && out.stdout.trim_ascii() == b"true"),
+    }
 }
 
-pub fn status(cwd: &str) -> Result<Status, String> {
+pub fn status(at: &Place) -> Result<Status, String> {
     Ok(parse_status(&git(
-        cwd,
+        at,
         &["status", "--porcelain=v1", "-b", "--untracked-files=all"],
     )?))
 }
@@ -78,15 +85,15 @@ pub fn parse_status(text: &str) -> Status {
 }
 
 /// Tracked changes against HEAD, as a unified patch.
-pub fn diff(cwd: &str) -> Result<String, String> {
-    match git(cwd, &["diff", "HEAD", "--no-color", "--no-ext-diff"]) {
+pub fn diff(at: &Place) -> Result<String, String> {
+    match git(at, &["diff", "HEAD", "--no-color", "--no-ext-diff"]) {
         Ok(d) => Ok(d),
-        Err(_) => git(cwd, &["diff", "--cached", "--no-color", "--no-ext-diff"]),
+        Err(_) => git(at, &["diff", "--cached", "--no-color", "--no-ext-diff"]),
     }
 }
 
-pub fn numstat(cwd: &str) -> Result<Vec<FileChange>, String> {
-    let text = git(cwd, &["diff", "HEAD", "--numstat"]).unwrap_or_default();
+pub fn numstat(at: &Place) -> Result<Vec<FileChange>, String> {
+    let text = git(at, &["diff", "HEAD", "--numstat"]).unwrap_or_default();
     Ok(parse_numstat(&text))
 }
 
@@ -105,16 +112,16 @@ pub fn parse_numstat(text: &str) -> Vec<FileChange> {
         .collect()
 }
 
-pub fn branches(cwd: &str) -> Result<Vec<String>, String> {
-    Ok(git(cwd, &["branch", "--format=%(refname:short)"])?
+pub fn branches(at: &Place) -> Result<Vec<String>, String> {
+    Ok(git(at, &["branch", "--format=%(refname:short)"])?
         .lines()
         .map(str::to_owned)
         .collect())
 }
 
-pub fn log(cwd: &str, limit: usize) -> Result<Vec<Commit>, String> {
+pub fn log(at: &Place, limit: usize) -> Result<Vec<Commit>, String> {
     let n = format!("-{limit}");
-    let text = git(cwd, &["log", &n, "--pretty=format:%h%x1f%s%x1f%an%x1f%cr"])?;
+    let text = git(at, &["log", &n, "--pretty=format:%h%x1f%s%x1f%an%x1f%cr"])?;
     Ok(text
         .lines()
         .filter_map(|l| {
@@ -129,44 +136,44 @@ pub fn log(cwd: &str, limit: usize) -> Result<Vec<Commit>, String> {
         .collect())
 }
 
-pub fn checkout(cwd: &str, branch: &str, create: bool) -> Result<(), String> {
+pub fn checkout(at: &Place, branch: &str, create: bool) -> Result<(), String> {
     let args: &[&str] = if create {
         &["checkout", "-b", branch]
     } else {
         &["checkout", branch]
     };
-    git(cwd, args).map(drop)
+    git(at, args).map(drop)
 }
 
-pub fn commit_all(cwd: &str, message: &str) -> Result<String, String> {
-    git(cwd, &["add", "-A"])?;
-    git(cwd, &["commit", "-m", message])?;
-    Ok(git(cwd, &["rev-parse", "--short", "HEAD"])?
+pub fn commit_all(at: &Place, message: &str) -> Result<String, String> {
+    git(at, &["add", "-A"])?;
+    git(at, &["commit", "-m", message])?;
+    Ok(git(at, &["rev-parse", "--short", "HEAD"])?
         .trim()
         .to_owned())
 }
 
-pub fn push(cwd: &str) -> Result<(), String> {
-    git(cwd, &["push", "-u", "origin", "HEAD"]).map(drop)
+pub fn push(at: &Place) -> Result<(), String> {
+    git(at, &["push", "-u", "origin", "HEAD"]).map(drop)
 }
 
-pub fn discard(cwd: &str, path: &str, untracked: bool) -> Result<(), String> {
+pub fn discard(at: &Place, path: &str, untracked: bool) -> Result<(), String> {
     if untracked {
-        git(cwd, &["clean", "-f", "--", path]).map(drop)
+        git(at, &["clean", "-f", "--", path]).map(drop)
     } else {
-        git(cwd, &["checkout", "HEAD", "--", path]).map(drop)
+        git(at, &["checkout", "HEAD", "--", path]).map(drop)
     }
 }
 
-pub fn worktree_add(repo: &str, path: &str, branch: &str) -> Result<(), String> {
+pub fn worktree_add(repo: &Place, path: &str, branch: &str) -> Result<(), String> {
     git(repo, &["worktree", "add", "-b", branch, path]).map(drop)
 }
 
-pub fn worktree_remove(repo: &str, path: &str) -> Result<(), String> {
+pub fn worktree_remove(repo: &Place, path: &str) -> Result<(), String> {
     git(repo, &["worktree", "remove", "--force", path]).map(drop)
 }
 
-pub fn worktrees(repo: &str) -> Result<Vec<(String, Option<String>)>, String> {
+pub fn worktrees(repo: &Place) -> Result<Vec<(String, Option<String>)>, String> {
     let text = git(repo, &["worktree", "list", "--porcelain"])?;
     let mut out = Vec::new();
     for block in text.split("\n\n") {
@@ -182,8 +189,8 @@ pub fn worktrees(repo: &str) -> Result<Vec<(String, Option<String>)>, String> {
 }
 
 /// Files in the project: tracked and untracked, without ignored ones.
-pub fn files(cwd: &str) -> Result<Vec<String>, String> {
-    Ok(git(cwd, &["ls-files", "-co", "--exclude-standard"])?
+pub fn files(at: &Place) -> Result<Vec<String>, String> {
+    Ok(git(at, &["ls-files", "-co", "--exclude-standard"])?
         .lines()
         .map(str::to_owned)
         .collect())
@@ -210,7 +217,7 @@ pub struct Author {
 }
 
 /// Pull requests through the GitHub CLI, which must be installed and signed in.
-pub fn pull_requests(cwd: &str) -> Result<Vec<PullRequest>, String> {
+pub fn pull_requests(at: &Place) -> Result<Vec<PullRequest>, String> {
     let text = output(
         "gh",
         &[
@@ -223,13 +230,13 @@ pub fn pull_requests(cwd: &str) -> Result<Vec<PullRequest>, String> {
             "--json",
             "number,title,headRefName,state,author,isDraft,url",
         ],
-        cwd,
+        at,
     )?;
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-pub fn create_pull_request(cwd: &str) -> Result<String, String> {
-    Ok(output("gh", &["pr", "create", "--fill"], cwd)?
+pub fn create_pull_request(at: &Place) -> Result<String, String> {
+    Ok(output("gh", &["pr", "create", "--fill"], at)?
         .trim()
         .to_owned())
 }
@@ -277,7 +284,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("oxlet-git-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let cwd = dir.to_str().unwrap();
+        let cwd = &Place::local(dir.to_str().unwrap());
         for args in [
             &["init", "-q", "-b", "main"][..],
             &["config", "user.email", "g@example.com"],
@@ -286,7 +293,7 @@ mod tests {
             git(cwd, args).unwrap();
         }
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();
-        assert!(is_repo(cwd));
+        assert!(is_repo(cwd).unwrap());
         commit_all(cwd, "first").unwrap();
         std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
         assert_eq!(

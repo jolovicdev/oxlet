@@ -8,4 +8,5 @@ pub mod provider;
 pub mod schedule;
 pub mod slash;
 pub mod store;
+pub mod target;
 pub mod time;

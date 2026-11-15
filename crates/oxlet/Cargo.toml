@@ -7,7 +7,7 @@ description = "A focused, native workspace for coding agents."
 
 [dependencies]
 oxlet-core.workspace = true
-rune = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20", features = ["native-file-dialog"] }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20", features = ["markdown"] }
 rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20" }
 rune-notify = { git = "https://github.com/anomalyco/rune", rev = "f6cf57db95c662c99c40d682a6076f20f18b2f20" }
