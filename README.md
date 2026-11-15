@@ -86,6 +86,10 @@ cargo run --release -p oxlet
 
 The code is two crates. `crates/oxlet-core` holds the workspace model, storage, the agent command lines and stream parsers, and the process and git runners. `crates/oxlet` is the interface. Processes, git calls and disk writes run on worker threads, and the interface thread only applies their results.
 
+## How it was made
+
+A good part of Oxlet's code was written by Claude, Anthropic's AI model, working from Dušan Jolović's direction and review.
+
 ## License
 
 MIT
