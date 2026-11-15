@@ -342,23 +342,43 @@ fn appearance(s: &App, k: &Kit) -> El {
                 .items_start()
                 .child(col().grow(1.0).child(heading(
                     "Appearance",
-                    "Theme, colours, fonts, text size, density and time format.",
+                    "Theme, colours, fonts, text size, density and time format. Restore defaults resets all of it.",
                     k,
                 )))
                 .child(restore),
         )
-        .child(cards)
-        .child(presets(s, k))
-        .child(fonts(s, k))
-        .child(palette_group(s, k, true))
-        .child(palette_group(s, k, false))
-        .child(group(
+        .child(section(k, "Mode", None, cards))
+        .child(section(
             k,
-            vec![
-                setting(k, "Density", None, density),
-                setting(k, "24-hour time", None, clock),
-            ],
+            "Palette",
+            Some("A palette sets the colours of both the dark and the light theme."),
+            presets(s, k),
         ))
+        .child(section(k, "Typography", None, fonts(s, k)))
+        .child(section(k, "Colours", None, palette_group(s, k)))
+        .child(section(
+            k,
+            "Layout",
+            None,
+            group(
+                k,
+                vec![
+                    setting(k, "Density", None, density),
+                    setting(k, "24-hour time", None, clock),
+                ],
+            ),
+        ))
+}
+
+/// One captioned part of a settings page.
+fn section(k: &Kit, title: &str, detail: Option<&str>, body: El) -> El {
+    let mut caption = col()
+        .gap(2.0)
+        .child(text(title).font(k.ty.small).color(k.c.text_faint));
+    if let Some(detail) = detail {
+        caption = caption.child(text(detail).font(k.ty.small).color(k.c.text_muted).wrap());
+    }
+    col().w_full().gap(8.0).child(caption).child(body)
 }
 
 pub fn restore_appearance(s: &mut App) {
@@ -447,6 +467,48 @@ fn presets(s: &App, k: &Kit) -> El {
                 } else {
                     c.text_muted
                 })),
+        );
+    }
+    if current.is_none() {
+        let p = if dark {
+            &s.ws.settings.dark
+        } else {
+            &s.ws.settings.light
+        };
+        let colour = |h: &str| theme::parse_hex(h).unwrap_or(Color::WHITE);
+        let swatch = row()
+            .w_full()
+            .h(44.0)
+            .radius(9.0)
+            .fill(colour(&p.background))
+            .border(1.0, c.border_weak)
+            .px(10.0)
+            .gap(6.0)
+            .center_y()
+            .child(
+                rune::el()
+                    .size(14.0, 14.0)
+                    .radius(7.0)
+                    .fill(colour(&p.accent)),
+            )
+            .child(
+                rune::el()
+                    .h(3.0)
+                    .w(28.0)
+                    .radius(1.5)
+                    .fill(colour(&p.foreground).alpha(0.55)),
+            );
+        list = list.child(
+            col()
+                .key("preset-Custom")
+                .grow(1.0)
+                .gap(6.0)
+                .items_center()
+                .role("radio")
+                .label("Custom")
+                .checked(true)
+                .child(swatch.outline(2.0, 2.0, c.bg_accent))
+                .child(text("Custom").font(k.ty.small).color(c.text_strong)),
         );
     }
     list
@@ -639,17 +701,21 @@ fn theme_preview(mode: ThemeMode, on: bool, k: &Kit) -> El {
         .child(preview)
 }
 
-fn palette_group(s: &App, k: &Kit, dark: bool) -> El {
+fn palette_group(s: &App, k: &Kit) -> El {
     let c = &k.c;
     let st = &s.ws.settings;
-    let active = theme::is_dark(st, k.dark) == dark;
+    let shown = theme::is_dark(st, k.dark);
+    let dark = s.colours_dark.unwrap_or(shown);
     let p = if dark { &st.dark } else { &st.light };
-    let title = if dark { "Dark theme" } else { "Light theme" };
-    let note = match (st.theme, active) {
-        (ThemeMode::System, _) if active => "Active now; follows the system.",
-        (ThemeMode::System, _) => "Used when the system switches appearance.",
-        (_, true) => "This is the active theme right now.",
-        _ => "Inactive while the app is locked to the other appearance.",
+    let which = SegmentedControl::new(&["Dark", "Light"], Some(if dark { 0 } else { 1 }))
+        .label("Theme to edit")
+        .on_pick(|s: &mut App, i, _| s.colours_dark = Some(i == 0))
+        .build(k)
+        .key("colours-theme");
+    let note = match (dark == shown, dark) {
+        (true, _) => "On screen now.",
+        (false, true) => "Used when the app is dark.",
+        (false, false) => "Used when the app is light.",
     };
     let reset = Button::new("Reset")
         .variant(ButtonVariant::GhostMuted)
@@ -664,20 +730,16 @@ fn palette_group(s: &App, k: &Kit, dark: bool) -> El {
             mark_dirty(s, tx);
         })
         .build(k)
-        .key(format!("{title}-reset"));
-    let header = col()
+        .key("colours-reset");
+    let header = row()
         .w_full()
         .px(14.0)
         .py(10.0)
-        .gap(4.0)
-        .child(
-            row()
-                .gap(8.0)
-                .center_y()
-                .child(text(title).font(k.ty.ui_medium).color(c.text_base))
-                .child(reset),
-        )
-        .child(text(note).font(k.ty.small).color(c.text_faint));
+        .gap(10.0)
+        .center_y()
+        .child(which)
+        .child(text(note).font(k.ty.small).color(c.text_faint).grow(1.0))
+        .child(reset);
     let fields: [(&'static str, &str, &str); 3] = if dark {
         [
             ("dark-accent", "Accent", &p.accent),

@@ -302,6 +302,8 @@ pub struct App {
     pub auto_schedule: usize,
 
     pub hex_fields: HashMap<&'static str, TextEdit>,
+    /// Which palette the colour card edits; `None` follows the theme on screen.
+    pub colours_dark: Option<bool>,
     pub provider_path: HashMap<ProviderId, TextEdit>,
     pub model_fields: HashMap<ProviderId, TextEdit>,
 
@@ -386,6 +388,7 @@ impl App {
             auto_project: None,
             auto_schedule: 1,
             hex_fields: HashMap::new(),
+            colours_dark: None,
             provider_path: HashMap::new(),
             model_fields: HashMap::new(),
             providers: HashMap::new(),

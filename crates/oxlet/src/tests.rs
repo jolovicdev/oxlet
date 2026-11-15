@@ -1281,7 +1281,10 @@ fn the_palette_hands_goal_to_the_composer_on_the_thread() {
 fn colours_apply_once_whole_and_unapplied_drafts_go_on_blur() {
     let sb = Sandbox::new("hex");
     let mut rt = runtime(&sb, vec![]);
-    rt.update(|s, _| crate::actions::go(s, Screen::Settings(Section::Appearance)));
+    rt.update(|s, _| {
+        crate::actions::go(s, Screen::Settings(Section::Appearance));
+        s.colours_dark = Some(false);
+    });
     rt.frame(1.0 / 60.0);
     click(&mut rt, "hex-light-background");
     press(&mut rt, rune::Key::Command('a'));
@@ -1295,6 +1298,37 @@ fn colours_apply_once_whole_and_unapplied_drafts_go_on_blur() {
     rt.frame(1.0 / 60.0);
     click(&mut rt, "hex-light-background");
     assert_eq!(rt.state.hex_fields["light-background"].text, "#F6F6F4");
+}
+
+#[test]
+fn the_colour_card_edits_the_theme_it_shows_and_resets_only_that_one() {
+    let sb = Sandbox::new("colours");
+    let mut rt = runtime(&sb, vec![]);
+    rt.update(|s, _| {
+        crate::actions::go(s, Screen::Settings(Section::Appearance));
+        s.ws.settings.theme = oxlet_core::model::ThemeMode::Dark;
+    });
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("hex-dark-accent").is_some() && rt.find("hex-light-accent").is_none());
+    assert!(rt.find("preset-Custom").is_none());
+
+    rt.update(|s, _| s.colours_dark = Some(false));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(
+        rt.state.ws.settings.theme,
+        oxlet_core::model::ThemeMode::Dark
+    );
+    click(&mut rt, "hex-light-accent");
+    press(&mut rt, rune::Key::Command('a'));
+    type_text(&mut rt, "#123456");
+    assert_eq!(rt.state.ws.settings.light.accent, "#123456");
+    assert!(rt.find("preset-Custom").is_some());
+
+    rt.update(|s, _| s.ws.settings.dark.accent = "#654321".into());
+    click(&mut rt, "colours-reset");
+    let st = &rt.state.ws.settings;
+    assert_eq!(st.light, oxlet_core::model::Palette::default_light());
+    assert_eq!(st.dark.accent, "#654321");
 }
 
 #[test]

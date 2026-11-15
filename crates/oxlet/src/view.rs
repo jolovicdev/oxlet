@@ -516,7 +516,7 @@ fn hero(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .center()
         .gap(14.0)
         .padding(24.0);
-    out = out.child(crate::sidebar::mark(k, 40.0).mb(16.0)).child(
+    out = out.child(crate::sidebar::mark(k, 44.0)).child(
         text("What should we build?")
             .font(rune::TextStyle {
                 weight: 600.0,
