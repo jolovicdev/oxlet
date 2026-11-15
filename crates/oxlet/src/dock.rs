@@ -19,23 +19,18 @@ pub fn view(s: &App, k: &Rc<Kit>) -> El {
     let mut tabs = row().key("dock-tabs").gap(2.0).center_y().role("tablist");
     for tab in DockTab::ALL {
         let on = tab == s.dock_tab;
+        let cell = row()
+            .key(format!("dock-tab-{}", tab.title()))
+            .h(26.0)
+            .px(10.0)
+            .center_y()
+            .radius(7.0);
         tabs = tabs.child(
-            row()
-                .key(format!("dock-tab-{}", tab.title()))
-                .h(26.0)
-                .px(10.0)
-                .center_y()
-                .radius(7.0)
+            theme::pressable(k, cell, on.then_some(c.pressed))
                 .role("tab")
                 .label(tab.title())
                 .checked(on)
                 .focusable(true)
-                .fill(if on {
-                    c.layer_02
-                } else {
-                    rune::Color::TRANSPARENT
-                })
-                .hover(c.hover)
                 .cursor(rune::Cursor::Pointer)
                 .on_press(move |s: &mut App| {
                     s.dock_tab = tab;

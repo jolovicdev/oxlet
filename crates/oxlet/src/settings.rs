@@ -52,13 +52,20 @@ pub fn view(s: &App, section: Section, k: &Kit, inset: f32, layer: &mut Vec<El>)
         );
         for &sec in sections {
             nav = nav.child(
-                SidebarRow::new(sec.title())
-                    .icon(section_icon(sec))
-                    .height(32.0)
-                    .selected(sec == section)
-                    .on_select(move |s: &mut App, _| actions::go(s, Screen::Settings(sec)))
-                    .build(k)
-                    .key(format!("settings-{}", sec.title())),
+                {
+                    let row = SidebarRow::new(sec.title())
+                        .icon(section_icon(sec))
+                        .height(32.0)
+                        .selected(sec == section)
+                        .on_select(move |s: &mut App, _| actions::go(s, Screen::Settings(sec)))
+                        .build(k);
+                    if sec == section {
+                        theme::glass(k, row, c.pressed)
+                    } else {
+                        row
+                    }
+                }
+                .key(format!("settings-{}", sec.title())),
             );
         }
     }
@@ -501,30 +508,32 @@ fn font_field(s: &App, k: &Kit, code: bool) -> El {
     };
     let choice = |label: &'static str, value: &'static str| {
         let on = current == value;
-        row()
+        let chip = row()
             .key(format!("{key}-{label}"))
             .h(28.0)
             .px(10.0)
             .center_y()
-            .radius(7.0)
-            .fill(if on { c.layer_02 } else { Color::TRANSPARENT })
-            .border(1.0, if on { c.border_base } else { c.border_weak })
-            .hover(c.hover)
-            .cursor(rune::Cursor::Pointer)
-            .role("radio")
-            .label(label)
-            .checked(on)
-            .focusable(true)
-            .on_press_tx(move |s: &mut App, tx| {
-                set_font(s, code, value);
-                s.hex_fields.remove(key);
-                mark_dirty(s, tx);
-            })
-            .child(text(label).font(k.ty.small).color(if on {
-                c.text_strong
-            } else {
-                c.text_muted
-            }))
+            .radius(7.0);
+        theme::pressable(
+            k,
+            chip,
+            Some(if on { c.pressed } else { c.bg_button_neutral }),
+        )
+        .cursor(rune::Cursor::Pointer)
+        .role("radio")
+        .label(label)
+        .checked(on)
+        .focusable(true)
+        .on_press_tx(move |s: &mut App, tx| {
+            set_font(s, code, value);
+            s.hex_fields.remove(key);
+            mark_dirty(s, tx);
+        })
+        .child(text(label).font(k.ty.small).color(if on {
+            c.text_strong
+        } else {
+            c.text_muted
+        }))
     };
     let custom =
         !current.is_empty() && current != "system" && !(!code && current == "Cascadia Code");
@@ -548,10 +557,14 @@ fn font_field(s: &App, k: &Kit, code: bool) -> El {
             mark_dirty(s, tx);
         })
         .build(k)
+        .shrink()
+        .min_w(72.0)
         .key(format!("{key}-name"));
     let mut choices = row()
         .gap(6.0)
         .center_y()
+        .shrink()
+        .min_w(0.0)
         .child(choice(builtin, ""))
         .child(choice("System", "system"));
     if !code {
@@ -611,16 +624,19 @@ fn theme_preview(mode: ThemeMode, on: bool, k: &Kit) -> El {
         ThemeMode::Light => row().w_full().h_full().child(half(false)),
         ThemeMode::Dark => row().w_full().h_full().child(half(true)),
     };
-    col()
+    let preview = col()
         .w_full()
         .h(104.0)
         .radius(10.0)
-        .border(
-            if on { 2.0 } else { 1.0 },
-            if on { k.c.text_strong } else { k.c.border_weak },
-        )
+        .border(1.0, k.c.border_weak)
         .clip_rounded(10.0)
-        .child(inner)
+        .child(inner);
+    // Outside the clip, which would cut the ring off.
+    col()
+        .w_full()
+        .radius(10.0)
+        .outline(if on { 2.0 } else { 0.0 }, 2.0, k.c.bg_accent)
+        .child(preview)
 }
 
 fn palette_group(s: &App, k: &Kit, dark: bool) -> El {

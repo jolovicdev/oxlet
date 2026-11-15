@@ -53,7 +53,7 @@ pub fn kanban(s: &App, k: &Kit) -> El {
             col()
                 .key(format!("kanban-{title}"))
                 .grow(1.0)
-                .min_w(180.0)
+                .w(180.0)
                 .h_full()
                 .min_h(0.0)
                 .child(
@@ -83,7 +83,14 @@ pub fn kanban(s: &App, k: &Kit) -> El {
                 ),
         );
     }
-    board
+    // Five columns do not fit a narrow window: they scroll sideways instead of clipping.
+    rune::el()
+        .key("kanban")
+        .w_full()
+        .h_full()
+        .min_h(0.0)
+        .scroll_x()
+        .child(board)
 }
 
 fn card(s: &App, t: &Thread, k: &Kit) -> El {
@@ -110,15 +117,13 @@ fn card(s: &App, t: &Thread, k: &Kit) -> El {
         })
         .build(k)
         .key(format!("card-toggle-{}", t.id));
-    col()
+    let card = col()
         .key(format!("card-{}", t.id))
         .w_full()
         .gap(6.0)
         .padding(10.0)
-        .radius(k.radius.md)
-        .fill(c.bg_base)
-        .border(1.0, c.border_weak)
-        .hover(c.hover)
+        .radius(k.radius.md);
+    theme::pressable(k, card, Some(c.bg_button_neutral))
         .cursor(rune::Cursor::Pointer)
         .role("button")
         .label(t.title.clone())
@@ -459,13 +464,13 @@ fn automation_row(s: &App, i: usize, a: &Automation, k: &Kit) -> El {
             ago => format!("Last run {ago} ago"),
         }
     });
-    row()
+    let card = row()
         .key(format!("automation-{}", a.id))
         .w_full()
         .gap(12.0)
         .padding(14.0)
-        .radius(k.radius.lg)
-        .fill(c.layer_01)
+        .radius(k.radius.lg);
+    theme::glass(k, card, c.bg_button_neutral)
         .center_y()
         .child(icon(theme::provider_icon(a.provider), 16.0).color(c.icon_muted))
         .child(

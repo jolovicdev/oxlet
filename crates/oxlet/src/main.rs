@@ -312,6 +312,21 @@ fn scene_confirm(s: &mut App) {
     s.confirm = Some(Pending::Discard("src/notes.md".into()));
 }
 
+fn preset(s: &mut App, name: &str) {
+    if let Some(p) = oxlet_core::model::PRESETS.iter().find(|p| p.name == name) {
+        s.ws.settings.dark = oxlet_core::model::Palette::preset(p, true);
+        s.ws.settings.light = oxlet_core::model::Palette::preset(p, false);
+    }
+}
+
+fn scene_kiln(s: &mut App) {
+    preset(s, "Kiln");
+}
+
+fn scene_graphite(s: &mut App) {
+    preset(s, "Graphite");
+}
+
 type Scene = (&'static str, fn(&mut App));
 
 const SCENES: &[Scene] = &[
@@ -330,6 +345,8 @@ const SCENES: &[Scene] = &[
     ("providers", scene_providers),
     ("terminal", scene_terminal),
     ("confirm", scene_confirm),
+    ("kiln", scene_kiln),
+    ("graphite", scene_graphite),
 ];
 
 fn main() {

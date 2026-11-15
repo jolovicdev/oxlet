@@ -4,15 +4,15 @@ use std::rc::Rc;
 
 use oxlet_core::model::{Palette, Settings, ThemeMode};
 use oxlet_core::provider::ProviderId;
-use rune::{Color, Family, Icon, TextStyle};
+use rune::{Color, El, Family, Icon, Shadow, TextStyle};
 use rune_kit::{Kit, PaletteSeed};
 use rune_theme_opencode::{icons, provider_icons};
 
-/// Oxlet's mark: an open ring with a bar turned inward, a G that is also a prompt.
+/// Oxlet's mark: a solid O with a shell prompt cut out of it.
 pub static MARK: Icon = Icon {
     name: "oxlet-mark",
     view: 24.0,
-    body: r#"<path d="M18.93 8A8 8 0 1 0 20 12H13" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
+    body: r#"<path fill="currentColor" fill-rule="evenodd" d="M12 2.4a9.6 9.6 0 1 0 0 19.2a9.6 9.6 0 0 0 0-19.2zM9.213 7.587L12.813 11.187A1.15 1.15 0 0 1 12.813 12.813L9.213 16.413A1.15 1.15 0 0 1 7.587 14.787L10.374 12L7.587 9.213A1.15 1.15 0 0 1 9.213 7.587zM13.4 14.45h3a1.15 1.15 0 0 1 0 2.3h-3a1.15 1.15 0 0 1 0-2.3z"/>"#,
 };
 
 pub fn is_dark(settings: &Settings, system_dark: bool) -> bool {
@@ -111,6 +111,8 @@ pub fn kit(settings: &Settings, dark: bool) -> Rc<Kit> {
         kit.c.submit_icon = Color::WHITE;
         kit.c.submit_hover = Color::WHITE.alpha(0.14);
         kit.c.border_focus = kit.c.bg_accent;
+        kit.c.scrim = kit.dark_a(if dark { 0.45 } else { 0.18 });
+        glaze(&mut kit, dark);
         kit.radius.sm = 6.0;
         kit.radius.md = 8.0;
         kit.radius.lg = 12.0;
@@ -145,6 +147,106 @@ pub fn kit(settings: &Settings, dark: bool) -> Rc<Kit> {
         *cell = Some((key, kit.clone()));
         kit
     })
+}
+
+/// Gives the kit's buttons the app's control material: a translucent tint of the ink, a hairline
+/// ring and a lit top edge, with no drop shadow (it would show through the tint). The accent
+/// takes the same edge in place of its sheen. Text fields keep the kit's ring and drop: they
+/// are wells, not glass.
+fn glaze(kit: &mut Kit, dark: bool) {
+    // A pale page shows white only against the tint under it, so light themes need more of it.
+    let (tint, lit) = if dark { (0.06, 0.07) } else { (0.045, 0.7) };
+    kit.c.bg_button_neutral = kit.alpha(kit.c.text_base, tint);
+    kit.c.submit_highlight = Color::TRANSPARENT;
+    let edge = |color| Shadow {
+        y: 1.0,
+        color,
+        inset: true,
+        ..Shadow::default()
+    };
+    let input = kit.elevation.button_neutral.clone();
+    let ring = input.iter().copied().filter(|s| s.blur == 0.0 && !s.inset);
+    let neutral = ring.chain([edge(kit.light(lit))]).collect();
+    let accent = vec![
+        Shadow {
+            spread: 0.5,
+            color: kit.dark_a(0.12),
+            ..Shadow::default()
+        },
+        edge(kit.light_on(0.22, kit.c.bg_accent)),
+    ];
+    kit.elevation = std::mem::take(&mut kit.elevation).with_input(input);
+    kit.elevation.button_neutral = neutral;
+    kit.elevation.button_contrast = accent;
+    // The lit edge is a zero-blur layer too, so rings keep the colours they are built with
+    // rather than all taking `border_base`.
+    kit.ring = None;
+    // The kit holds secondary ink to 4.5:1 (muted) and 3:1 (faint) on the page. The darkest
+    // surface text sits on is a selected row on the rail, so the floors hold there too.
+    let floor = over_srgb(kit.c.pressed, kit.c.bg_deep);
+    let held = Kit::from_palette(PaletteSeed {
+        bg: floor,
+        fg: kit.c.text_base,
+        accent: kit.c.bg_accent,
+    });
+    let c = &mut kit.c;
+    if contrast(c.text_muted, floor) < 4.5 {
+        (c.text_muted, c.text_weak, c.icon_muted) =
+            (held.c.text_muted, held.c.text_weak, held.c.icon_muted);
+    }
+    if contrast(c.text_faint, floor) < 3.0 {
+        (c.text_faint, c.icon_faint) = (held.c.text_faint, held.c.icon_faint);
+    }
+}
+
+/// `top` painted over opaque `bottom` as the window blends by default, in sRGB.
+fn over_srgb(top: Color, bottom: Color) -> Color {
+    use rune::theme::{srgb_decode as dec, srgb_encode as enc};
+    let mix = |t: f32, b: f32| dec(enc(t) * top.a + enc(b) * (1.0 - top.a));
+    Color {
+        r: mix(top.r, bottom.r),
+        g: mix(top.g, bottom.g),
+        b: mix(top.b, bottom.b),
+        a: 1.0,
+    }
+}
+
+fn contrast(a: Color, b: Color) -> f32 {
+    let (a, b) = (a.luminance(), b.luminance());
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Blur of a frosted surface's backdrop, in points.
+const FROST_BLUR: f32 = 24.0;
+/// A frosted surface's tint opacity: enough that its muted text keeps 4.5:1 over sharp ink,
+/// where the blur is missing (past the per-frame blur budget).
+const FROST: f32 = 0.9;
+
+/// `e` in the control material, over `fill`: the resting tint (`c.bg_button_neutral`), the
+/// selected one (`c.pressed`) or a status role's `bg`.
+pub fn glass(k: &Kit, e: El, fill: Color) -> El {
+    k.elevate(e.fill(fill), &k.elevation.button_neutral)
+}
+
+/// A hand-built control: glass over `fill` when given, bare until hovered when not, and the
+/// kit's hover and press tints either way.
+pub fn pressable(k: &Kit, e: El, fill: Option<Color>) -> El {
+    k.interactive(match fill {
+        Some(f) => glass(k, e, f),
+        None => e,
+    })
+}
+
+/// A floating surface (popup, palette, toast): the raised layer, translucent over a blur of
+/// what is behind it.
+pub fn frost(k: &Kit, e: El) -> El {
+    e.backdrop_blur(FROST_BLUR)
+        .fill(k.alpha(k.c.layer_01, FROST))
+}
+
+/// `e` with a blur of what is behind it, under its own fill: a frosted scrim.
+pub fn blur_behind(e: El) -> El {
+    e.backdrop_blur(FROST_BLUR)
 }
 
 /// The window behind the framed main pane: one perceptual step from the page toward the ink.

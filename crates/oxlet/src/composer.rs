@@ -44,7 +44,7 @@ fn models(s: &App) -> Vec<(ProviderId, String, String)> {
     all
 }
 
-pub fn view(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+pub fn view(s: &App, k: &Kit, layer: &mut Vec<El>, width: Option<f32>) -> El {
     let c = &k.c;
     let thread = s.thread();
     let working = thread.is_some_and(|t| s.turns.contains_key(&t.id));
@@ -159,6 +159,8 @@ pub fn view(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             row()
                 .gap(4.0)
                 .center_y()
+                .shrink()
+                .min_w(0.0)
                 .child(access_glyph)
                 .child(access_select),
         );
@@ -216,6 +218,8 @@ pub fn view(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         row()
             .gap(4.0)
             .center_y()
+            .shrink()
+            .min_w(0.0)
             .child(icon(theme::provider_icon(provider), 13.0).color(c.icon_base))
             .child(model_select),
     );
@@ -264,25 +268,14 @@ pub fn view(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     };
     tools = tools.child(send.build(k).key("composer-send"));
 
-    slash_popup(s, k, layer);
+    slash_popup(s, k, layer, width);
 
-    col()
+    let shell = col()
         .key("composer")
         .on_drop_files(|s: &mut App, paths: &[std::path::PathBuf], _| actions::drop_files(s, paths))
         .w_full()
-        .radius(18.0)
-        .fill(c.bg_base)
-        .border(1.0, c.border_base)
-        .shadow(
-            4.0,
-            16.0,
-            rune::Color {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: if k.dark { 0.35 } else { 0.06 },
-            },
-        )
+        .radius(18.0);
+    theme::glass(k, shell, c.bg_button_neutral)
         .children(s.editing.is_some().then(|| editing_banner(k)))
         .child(queued(s, k))
         .child(col().w_full().px(16.0).pt(16.0).pb(8.0).child(field))
@@ -424,7 +417,7 @@ fn on_key(s: &mut App, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
     false
 }
 
-fn slash_popup(s: &App, k: &Kit, layer: &mut Vec<El>) {
+fn slash_popup(s: &App, k: &Kit, layer: &mut Vec<El>, width: Option<f32>) {
     if s.slash_dismissed {
         return;
     }
@@ -447,7 +440,7 @@ fn slash_popup(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .label("Commands")
         .placement(rune_kit::Placement::TopStart)
         .open(true)
-        .width(480.0)
+        .width(width.unwrap_or(480.0))
         .max_height(320.0)
         .items(items)
         .empty_message("No matching command")

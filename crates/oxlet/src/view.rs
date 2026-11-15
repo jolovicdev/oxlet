@@ -32,17 +32,32 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
                     Toolbar::new().title("Automations"),
                 ),
                 _ => (
-                    thread_screen(s, &k, &mut layer),
+                    thread_screen(s, &k, &mut layer, cx.layout_with("composer", |r| r[2])),
                     thread_toolbar(s, &k, &mut layer),
                 ),
             };
+            // A window too narrow for the sidebar, the review panel and a readable thread shows
+            // the thread and the panel; the panes' saved state stays as it is.
+            let (mut side, mut review) = (s.sidebar, s.dock);
+            let room = cx.layout_with("shell", |r| r[2]).unwrap_or(f32::INFINITY);
+            let squeezed = screen == Screen::Thread
+                && side.is_open()
+                && review.is_open()
+                && room < side.width() + review.width() + THREAD_MIN;
+            if squeezed {
+                side.set_open(false);
+                review.set_width(review.width().min(room - THREAD_MIN));
+            }
             let mut split = SplitView::new(main).sidebar(
-                &s.sidebar,
+                &side,
                 |s: &mut App| &mut s.sidebar,
                 sidebar::view(s, &k, &mut layer),
             );
             if screen == Screen::Thread {
-                split = split.inspector(&s.dock, |s: &mut App| &mut s.dock, dock::view(s, &k));
+                split = split.inspector(&review, |s: &mut App| &mut s.dock, dock::view(s, &k));
+            }
+            if squeezed {
+                split = split.hide_sidebar_toggle();
             }
             split
                 .toolbar(toolbar)
@@ -77,6 +92,11 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
                 .build(&k)
         }
     };
+    // Every popup the screens open is modal, so at most one is open, and the kit pushes its
+    // surface after its dismiss scrim.
+    if let Some(surface) = layer.pop() {
+        layer.push(theme::frost(&k, surface));
+    }
     confirm(s, &k, &mut layer);
     layer.extend(crate::palette::view(s, &k));
     if let Some(t) = &s.toast {
@@ -85,6 +105,9 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     rune_kit::root(base, layer)
         .on_window_focus(|s: &mut App, focused, _| s.window_focused = focused)
 }
+
+/// The narrowest the thread pane gets beside an open review panel, in points.
+const THREAD_MIN: f32 = 360.0;
 
 fn plural(n: usize, one: &str) -> String {
     format!("{n} {one}{}", if n == 1 { "" } else { "s" })
@@ -241,6 +264,7 @@ fn confirm(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 .variant(ButtonVariant::Danger)
                 .on_press_tx(actions::confirmed)
                 .build(k)
+                .fill(k.c.danger.bg)
                 .key("confirm-ok"),
         );
     // The kit's description line does not wrap, and a path can be long.
@@ -258,6 +282,12 @@ fn confirm(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .child(detail)
         .child(buttons)
         .build(k, layer);
+    // The kit pushes the scrim, then the layer that centres the panel.
+    let panel = layer.pop();
+    if let Some(scrim) = layer.pop() {
+        layer.push(theme::blur_behind(scrim));
+    }
+    layer.extend(panel);
 }
 
 fn ms(n: u64) -> Duration {
@@ -280,29 +310,24 @@ fn toast(message: &str, k: &Kit) -> El {
         .pb(28.0)
         .inert()
         .child(
-            row()
-                .key("toast")
-                .max_w(520.0)
-                .px(14.0)
-                .py(9.0)
-                .radius(10.0)
-                .fill(c.bg_inverse)
-                .shadow(
-                    6.0,
-                    20.0,
-                    rune::Color {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 0.25,
-                    },
-                )
-                .child(
-                    text(message.to_owned())
-                        .font(k.ty.ui)
-                        .color(c.text_inverse)
-                        .wrap(),
+            theme::frost(
+                k,
+                k.elevate(
+                    row()
+                        .key("toast")
+                        .max_w(520.0)
+                        .px(14.0)
+                        .py(9.0)
+                        .radius(10.0),
+                    &k.elevation.floating,
                 ),
+            )
+            .child(
+                text(message.to_owned())
+                    .font(k.ty.ui)
+                    .color(c.text_base)
+                    .wrap(),
+            ),
         )
 }
 
@@ -325,11 +350,14 @@ fn thread_toolbar(s: &App, k: &Kit, layer: &mut Vec<El>) -> Toolbar {
         Some(t) => row()
             .gap(8.0)
             .center_y()
+            .shrink()
+            .min_w(0.0)
             .child(icon(theme::provider_icon(t.provider), 14.0).color(c.icon_muted))
             .child(
                 text(t.title.clone())
                     .font(k.ty.ui_medium)
                     .color(c.text_base)
+                    .shrink()
                     .truncate(),
             ),
         None => text("New thread").font(k.ty.ui_medium).color(c.text_base),
@@ -451,7 +479,8 @@ fn open_in(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     .build(k, layer)
 }
 
-fn thread_screen(s: &App, k: &Rc<Kit>, layer: &mut Vec<El>) -> El {
+/// `composer_w` is the composer's width as last laid out: its command popup spans it.
+fn thread_screen(s: &App, k: &Rc<Kit>, layer: &mut Vec<El>, composer_w: Option<f32>) -> El {
     let composer = row()
         .w_full()
         .justify_center()
@@ -462,7 +491,7 @@ fn thread_screen(s: &App, k: &Rc<Kit>, layer: &mut Vec<El>) -> El {
             col()
                 .w_full()
                 .max_w(thread::COLUMN)
-                .child(composer::view(s, k, layer)),
+                .child(composer::view(s, k, layer, composer_w)),
         );
     let body = match s.thread() {
         Some(t) => thread::transcript(s, t, k),
@@ -610,17 +639,14 @@ fn starters(k: &Kit) -> El {
     ];
     let card = |i: usize| {
         let (title, detail, prompt) = STARTERS[i];
-        col()
+        let card = col()
             .key(format!("starter-{i}"))
             .grow(1.0)
             .min_w(0.0)
             .gap(4.0)
             .padding(14.0)
-            .radius(12.0)
-            .fill(c.layer_01)
-            .border(1.0, c.border_weak)
-            .hover(c.hover)
-            .press(c.pressed)
+            .radius(12.0);
+        theme::pressable(k, card, Some(c.bg_button_neutral))
             .cursor(rune::Cursor::Pointer)
             .role("button")
             .label(title)

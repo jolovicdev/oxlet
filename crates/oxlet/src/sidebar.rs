@@ -138,11 +138,8 @@ fn primary_row(s: &App, k: &Kit) -> El {
         .px(10.0)
         .gap(8.0)
         .center_y()
-        .radius(9.0)
-        .fill(c.bg_base)
-        .border(1.0, c.border_weak)
-        .hover(c.hover)
-        .press(c.pressed)
+        .radius(9.0);
+    let new = theme::pressable(k, new, Some(c.bg_button_neutral))
         .cursor(rune::Cursor::Pointer)
         .role("button")
         .label("New thread")
@@ -160,22 +157,27 @@ fn primary_row(s: &App, k: &Kit) -> El {
         .key("brand-search")
         .size(34.0, 34.0)
         .center()
-        .radius(9.0)
-        .fill(if s.searching { c.layer_02 } else { c.bg_base })
-        .border(1.0, c.border_weak)
-        .hover(c.hover)
-        .press(c.pressed)
-        .cursor(rune::Cursor::Pointer)
-        .role("button")
-        .label("Search threads")
-        .help(format!("Search threads  {}", shortcut("K")))
-        .focusable(true)
-        .on_press(|s: &mut App| {
-            s.searching = !s.searching;
-            s.search = TextEdit::new("");
-            s.search.focused = s.searching;
-        })
-        .child(icon(&icons::MAGNIFYING_GLASS, 15.0).color(c.icon_muted));
+        .radius(9.0);
+    let search = theme::pressable(
+        k,
+        search,
+        Some(if s.searching {
+            c.pressed
+        } else {
+            c.bg_button_neutral
+        }),
+    )
+    .cursor(rune::Cursor::Pointer)
+    .role("button")
+    .label("Search threads")
+    .help(format!("Search threads  {}", shortcut("K")))
+    .focusable(true)
+    .on_press(|s: &mut App| {
+        s.searching = !s.searching;
+        s.search = TextEdit::new("");
+        s.search.focused = s.searching;
+    })
+    .child(icon(&icons::MAGNIFYING_GLASS, 15.0).color(c.icon_muted));
     row().w_full().gap(6.0).child(new).child(search)
 }
 
@@ -185,9 +187,13 @@ fn destinations(s: &App, k: &Kit) -> El {
     let automations = s.ws.automations.iter().filter(|a| a.enabled).count();
     let items: [(&str, &'static rune::Icon, Screen); 4] = [
         ("Threads", &icons::BUBBLE_5, Screen::Thread),
-        ("Board", &icons::DOT_GRID, Screen::Kanban),
+        ("Board", &icons::SPLIT, Screen::Kanban),
         ("Pull requests", &icons::BRANCH, Screen::PullRequests),
-        ("Automations", &icons::STATUS, Screen::Automations),
+        (
+            "Automations",
+            &icons::OUTLINE_ROTATE_CLOCKWISE,
+            Screen::Automations,
+        ),
     ];
     let mut bar = row()
         .key("destinations")
@@ -197,19 +203,14 @@ fn destinations(s: &App, k: &Kit) -> El {
         .role("tablist");
     for (label, glyph, screen) in items {
         let on = s.screen == screen;
-        let mut cell = row()
+        let cell = row()
             .key(format!("nav-{}", label.to_lowercase().replace(' ', "-")))
             .grow(1.0)
             .h(30.0)
             .center()
             .gap(5.0)
-            .radius(8.0)
-            .fill(if on {
-                c.layer_02
-            } else {
-                rune::Color::TRANSPARENT
-            })
-            .hover(c.hover)
+            .radius(8.0);
+        let mut cell = theme::pressable(k, cell, on.then_some(c.pressed))
             .cursor(rune::Cursor::Pointer)
             .role("tab")
             .label(label)
@@ -353,14 +354,12 @@ fn projects(s: &App, k: &Kit, layer: &mut Vec<El>) -> SidebarSection {
                 .iter()
                 .filter(|t| t.project == p.id && t.status == ThreadStatus::Working)
                 .count();
+        let selected =
+            s.screen == Screen::Thread && s.selected.is_none() && current.as_deref() == Some(&p.id);
         let mut r = SidebarRow::new(p.name.clone())
             .icon(&icons::FOLDER)
             .height(nav_h(s))
-            .selected(
-                s.screen == Screen::Thread
-                    && s.selected.is_none()
-                    && current.as_deref() == Some(&p.id),
-            )
+            .selected(selected)
             .on_select(move |s: &mut App, _| {
                 s.draft_project = Some(id.clone());
                 actions::new_thread(s);
@@ -380,8 +379,13 @@ fn projects(s: &App, k: &Kit, layer: &mut Vec<El>) -> SidebarSection {
             );
         }
         let id = p.id.clone();
-        let built = r
-            .build(k)
+        let built = r.build(k);
+        let built = if selected {
+            theme::glass(k, built, k.c.pressed)
+        } else {
+            built
+        };
+        let built = built
             .key(format!("project-{}", p.id))
             .on_secondary_press(move |s: &mut App, at, _| s.project_menu = Some((id.clone(), at)));
         rows.push(match &s.project_menu {
@@ -437,11 +441,12 @@ fn subtitle(s: &App, t: &Thread) -> String {
 fn thread_row(s: &App, t: &Thread, k: &Kit, layer: &mut Vec<El>) -> El {
     let id = t.id.clone();
     let avatar = icon(theme::provider_icon(t.provider), 14.0).color(k.c.icon_muted);
+    let selected = s.screen == Screen::Thread && s.selected.as_deref() == Some(&t.id);
     let mut r = SidebarRow::new(t.title.clone())
         .height(row_h(s))
         .avatar(row().size(16.0, 16.0).center().child(avatar))
         .subtitle(subtitle(s, t))
-        .selected(s.screen == Screen::Thread && s.selected.as_deref() == Some(&t.id))
+        .selected(selected)
         .on_select({
             let id = id.clone();
             move |s: &mut App, tx| actions::select_thread(s, &id, tx)
@@ -467,8 +472,13 @@ fn thread_row(s: &App, t: &Thread, k: &Kit, layer: &mut Vec<El>) -> El {
             |s: &mut App, _| s.renaming = None,
         );
     }
-    let built = r
-        .build(k)
+    let built = r.build(k);
+    let built = if selected {
+        theme::glass(k, built, k.c.pressed)
+    } else {
+        built
+    };
+    let built = built
         .key(format!("thread-{}", t.id))
         .on_secondary_press(move |s: &mut App, p, _| s.thread_menu = Some((id.clone(), p)));
     match &s.thread_menu {

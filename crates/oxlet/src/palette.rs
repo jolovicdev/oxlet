@@ -246,7 +246,7 @@ pub fn view(s: &App, k: &Kit) -> Option<El> {
                 .gap(10.0)
                 .center_y()
                 .radius(8.0)
-                .fill(if on { c.layer_02 } else { Color::TRANSPARENT })
+                .fill(if on { c.pressed } else { Color::TRANSPARENT })
                 .hover(c.hover)
                 .cursor(rune::Cursor::Pointer)
                 .role("option")
@@ -263,22 +263,8 @@ pub fn view(s: &App, k: &Kit) -> Option<El> {
                 .child(text(e.detail).font(k.ty.small).color(c.text_faint)),
         );
     }
-    let panel = col()
-        .key("palette")
-        .w(600.0)
-        .radius(14.0)
-        .fill(c.bg_base)
-        .border(1.0, c.border_base)
-        .shadow(
-            18.0,
-            48.0,
-            Color {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: if k.dark { 0.5 } else { 0.18 },
-            },
-        )
+    let panel = col().key("palette").w(600.0).radius(14.0);
+    let panel = theme::frost(k, k.elevate(panel, &k.elevation.overlay))
         .modal(true, |s: &mut App| s.palette = None)
         .child(
             row()
@@ -300,14 +286,7 @@ pub fn view(s: &App, k: &Kit) -> Option<El> {
             .h_full()
             .items_center()
             .pt(96.0)
-            .child(
-                rune_kit::scrim("palette-scrim", |s: &mut App| s.palette = None).fill(Color {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: if k.dark { 0.45 } else { 0.18 },
-                }),
-            )
+            .child(rune_kit::scrim("palette-scrim", |s: &mut App| s.palette = None).fill(c.scrim))
             .child(panel),
     )
 }

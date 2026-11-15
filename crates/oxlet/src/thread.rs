@@ -152,6 +152,7 @@ fn assistant_message(s: &App, t: &Thread, m: &Message, k: &Kit) -> El {
             Part::Text { text } => out.child(
                 Markdown::new(text.clone())
                     .selectable(true)
+                    .scroll_wide(true)
                     .streaming(live && i + 1 == m.parts.len())
                     .build(k)
                     .key(format!("{}-md{i}", m.id)),
@@ -396,19 +397,20 @@ fn edits_card(m: &Message, files: &[FileChange], s: &App, k: &Kit) -> El {
     card
 }
 
+/// Lines added and removed, each side only when it is not zero.
 pub fn counts(added: u32, removed: u32, k: &Kit) -> El {
     row()
         .gap(6.0)
-        .child(
+        .children((added > 0).then(|| {
             text(format!("+{added}"))
                 .font(k.ty.small_medium)
-                .color(k.c.success.icon),
-        )
-        .child(
+                .color(k.c.success.icon)
+        }))
+        .children((removed > 0).then(|| {
             text(format!("-{removed}"))
                 .font(k.ty.small_medium)
-                .color(k.c.danger.icon),
-        )
+                .color(k.c.danger.icon)
+        }))
 }
 
 fn footer(s: &App, t: &Thread, m: &Message, k: &Kit) -> El {
