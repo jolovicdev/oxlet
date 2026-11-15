@@ -35,8 +35,14 @@ pub struct Commit {
     pub when: String,
 }
 
+/// Paths are read as git stores them: by default it prints non-ASCII names as quoted octal
+/// escapes, which name no file.
 fn git(at: &Place, args: &[&str]) -> Result<String, String> {
-    output("git", args, at)
+    let args: Vec<&str> = ["-c", "core.quotePath=false"]
+        .into_iter()
+        .chain(args.iter().copied())
+        .collect();
+    output("git", &args, at)
 }
 
 /// Whether `at` is inside a work tree; an error when its target can't be reached.
@@ -342,6 +348,10 @@ mod tests {
         for entry in status(cwd).unwrap().entries {
             discard(cwd, &entry).unwrap();
         }
+        std::fs::write(dir.join("café.md"), "x\n").unwrap();
+        assert_eq!(status(cwd).unwrap().entries[0].path, "café.md");
+        assert!(files(cwd).unwrap().contains(&"café.md".to_owned()));
+        std::fs::remove_file(dir.join("café.md")).unwrap();
         assert!(status(cwd).unwrap().entries.is_empty());
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
         assert!(!dir.join("b.txt").exists());
